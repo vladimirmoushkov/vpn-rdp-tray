@@ -10,7 +10,7 @@
 ## Build and test the candidate
 
 1. Check out the reviewed versioned commit on a clean Windows runner. Run the test project and `build.ps1`. Record the exact .NET SDK, restored runtime, and Inno Setup versions so another maintainer can repeat the build. `build.ps1` creates a source ZIP from selected project files, extracts it to a fresh staging directory, and builds the installer from that copy. It stages the runtime notices with the application and outputs the ZIP, installer, and `SHA256SUMS.txt`. [Build steps](README.md#build-and-verify)
-2. Install in a clean Windows 11 x64 VM as a standard user. Check first launch and **Settings required**, install and uninstall, and separate elevation for OpenVPN and hosts changes. Use a dedicated test VPN and remote PC to verify settings persistence, whole-session recovery after VPN loss, certificate and credential failures, Entra sign-in and cancellation, and the exported installer. Check the installed folder for the app and runtime notices. [Acceptance tests](README.md#build-and-verify)
+2. Install in a clean Windows 11 x64 VM as a standard user. Check first launch and **Settings required**, install and uninstall, and separate elevation for OpenVPN and hosts changes. Use a dedicated test VPN and remote PC to verify settings persistence, recovery after VPN loss, certificate and credential failures, and Entra sign-in and cancellation. Check the installed folder for the app and runtime notices. [Acceptance tests](README.md#build-and-verify)
 
 ## Sign and publish
 

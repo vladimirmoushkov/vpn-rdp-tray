@@ -92,11 +92,13 @@ internal sealed class StatusPreviewPanel : Control
         var shownRdp = !rdpEnabled ? new ConnectionStatus(ConnectionController.RdpOffStatus) :
             !hasConfiguration || !connection ? new ConnectionStatus("RDP waiting for VPN") : rdp;
         var rdpStage = shownRdp.Name is "RDP connected" or "Opened in Remote Desktop" ? Stage.Connected :
+            shownRdp.Name == ConnectionController.RdpClosedStatus ? Stage.Waiting :
             shownRdp.Action || shownRdp.RetryAt.HasValue ? Stage.Attention :
             rdpEnabled && connection && vpn.Name == "VPN connected" && shownRdp.Name != "RDP waiting for VPN" ? Stage.Running : Stage.Waiting;
         string rdpAction = !actionsEnabled ? "Wait for the current change to finish." :
             !hasConfiguration ? "Open Settings to set up Remote Desktop." :
             !connection ? "Turn VPN on to control Remote Desktop." :
+            shownRdp.Name == ConnectionController.RdpClosedStatus ? "Open Remote Desktop." :
             rdpEnabled ? "Turn Remote Desktop off." : "Turn Remote Desktop on.";
         string? rdpContext = shownRdp.Name switch
         {
@@ -104,6 +106,7 @@ internal sealed class StatusPreviewPanel : Control
             "RDP connected" when minimized => "Minimized · Waiting for a desktop frame. Use Open Remote Desktop in the tray menu.",
             "RDP connected" => "Waiting for a desktop frame. Use Open Remote Desktop in the tray menu.",
             "Opened in Remote Desktop" => "Choose Open Remote Desktop in the tray menu to return to the Windows session.",
+            ConnectionController.RdpClosedStatus => "Click here to reopen Remote Desktop.",
             "RDP paused" => "Open Settings to review the Remote Desktop connection.",
             _ when shownRdp.Action => "Choose Open Remote Desktop in the tray menu to continue.",
             _ => null

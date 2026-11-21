@@ -23,6 +23,8 @@ internal sealed record RdpSettings(string Host, string? Ip, int Port, string Use
     string? Password, bool WindowsHosts, bool EntraActiveX)
 {
     public bool MultiMonitor { get; init; } = true;
+    public bool InternalGlow { get; init; } = true;
+    public bool ExternalGlow { get; init; } = true;
     public bool SimulateActivity { get; init; }
     public bool RedirectSecurityKeys { get; init; } = true;
     public bool RedirectUsbDevices { get; init; } = true;

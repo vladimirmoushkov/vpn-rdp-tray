@@ -8,7 +8,7 @@
 [Setup]
 AppId={{38428A31-ACFF-4C28-9A4F-427613E1F137}
 AppName=VPN Remote Desktop
-AppVersion=1.0.22
+AppVersion=1.0.23
 DefaultDirName={localappdata}\Programs\VpnRdpTray
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -31,7 +31,6 @@ Name: "autostart"; Description: "Start VPN Remote Desktop at Windows sign-in"
 
 [Files]
 Source: "{#Payload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{srcexe}"; DestDir: "{app}"; DestName: "shareable-setup.exe"; Flags: external ignoreversion; Check: ShouldCacheInstaller
 
 [Icons]
 Name: "{userprograms}\VPN Remote Desktop"; Filename: "{app}\VpnRdpTray.exe"; Parameters: "--status"
@@ -92,11 +91,6 @@ begin
     Result := '1'
   else
     Result := '0';
-end;
-
-function ShouldCacheInstaller: Boolean;
-begin
-  Result := CompareText(ExpandConstant('{srcexe}'), ExpandConstant('{app}\shareable-setup.exe')) <> 0;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

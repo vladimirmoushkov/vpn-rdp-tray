@@ -17,7 +17,7 @@ You need Windows 11 x64, an OpenVPN profile from your VPN administrator, and the
 
 **Settings required** appears in the notification area until you save a configuration. If you cannot see the tray icon, open **VPN Remote Desktop** from Start or press **Ctrl+Shift+F11** to open the status window.
 
-To install on another PC, choose **Settings → App and OpenVPN → Save installer…**. This saves a copy of the original release installer. The recipient enters their connection details on their own PC.
+For another PC, use the same release installer and checksum file. The recipient enters their connection details on their own PC. [Releases](../../releases)
 
 ### VPN profile and sign-in
 
@@ -51,7 +51,7 @@ Open **Settings → Remote Desktop**. Leave the port at 3389 unless your remote 
 
 Left-click the tray icon or press **Ctrl+Shift+F11** for the status window. The activity log shows connection attempts, failures, and retry times in local time. Use the **VPN** circle to turn Connection on or off or to answer a pending VPN sign-in prompt. **Settings** is at the top right.
 
-Use the **RDP** circle to turn Remote Desktop off or back on while Connection is enabled. Turning RDP off closes the app’s Remote Desktop window and stops RDP retries while the VPN stays connected. This switch lasts until you exit the app. While RDP is on, closing a signed-in embedded desktop still schedules a reconnect. Use **Exit** in the tray menu to close the app and its connections.
+Use the **RDP** circle to turn Remote Desktop off or back on while Connection is enabled. Turning RDP off closes the app’s Remote Desktop window and stops RDP retries while the VPN stays connected. Closing the desktop yourself also keeps it closed for the current app run, including after VPN recovery. Click the **RDP** circle or select **Open Remote Desktop** from the tray to reconnect when ready. A network interruption still triggers retry for an open embedded session. Use **Exit** in the tray menu to close the app and its connections.
 
 The right panel requests a scaled preview of a signed-in embedded desktop about every two seconds while the status window is visible. When a frame appears, the VPN and RDP circles move above it. Click the preview or choose **Open Remote Desktop** from the tray to return to the session. Windows can pause rendering when the desktop is minimized. In that case the panel retains its last available frame. The preview stays in memory and clears on disconnect. Use the tray action to return to a native session or a Windows sign-in prompt. [Windows RDP display updates](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/79202daa-76b8-4a09-ac67-fc3cae7d895f)
 
@@ -61,7 +61,7 @@ The right panel requests a scaled preview of a signed-in embedded desktop about 
 - Press **Ctrl+Shift+N** to minimize the focused desktop in either mode. **Open Remote Desktop** restores the same session and view.
 - **Use all monitors in full screen** is on by default. The app requests the local display layout at connection time with multiple eligible monitors. Clear the setting for a single-display session. [Windows RDP display properties](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-properties#display-settings)
 
-The windowed desktop stays at least two-thirds as wide and two-thirds as tall as its monitor. A translucent blue glow marks the windowed desktop outside the frame and fades inward over five display-scaled pixels at the full-screen edges. You can still use the mouse at the edges.
+The windowed desktop stays at least two-thirds as wide and two-thirds as tall as its monitor. The embedded desktop has a translucent glow outside the windowed frame and a narrow, click-through glow inside the full-screen edges. In **Settings → Remote Desktop**, **Internal glow (full screen)** and **External glow (windowed)** control them independently. Both start on. Saving only a glow change updates the open embedded desktop without reconnecting.
 
 **Simulate activity** is off by default and applies only to a signed-in embedded desktop. Move the pointer over the remote desktop once after signing in so the app has a starting point. It waits at least a minute after sign-in and after the desktop gains or loses focus. With the desktop focused, it also waits for a minute without local keyboard or mouse input. After a minute in the background, other local windows can still be in use. The app attempts one small movement of the remote pointer per minute. It sends movement only and leaves your local pointer in place. It skips the movement during authentication prompts, while a modifier key or mouse button is held, or when it cannot place the pointer reliably. Enable it only where your remote-access policy permits it. The remote host still controls session limits and sign-out. [Windows RDP pointer input](https://learn.microsoft.com/en-us/windows/win32/termserv/imsrdpinputsink)
 
@@ -79,13 +79,28 @@ For Entra sessions that need in-session FIDO2/WebAuthn or low-level USB redirect
 | OpenVPN has yet to acknowledge sign-in | Check the installed OpenVPN version and VPN sign-in settings. This step is the handoff to the local VPN client. |
 | VPN is waiting for the server | Check connectivity and DNS. If the server still fails to answer, ask your VPN administrator to verify the listener and port. |
 | VPN paused after a credential rejection | Check the account and authenticator settings. Save the corrected Settings to resume. |
-| VPN paused after a certificate failure | Read the last VPN error in the activity log. It can distinguish certificate dates, trust, name or fingerprint mismatch, revocation, and problems with the client certificate or imported profile. Check this PC’s date and time for a date-related error. Ask the VPN administrator to verify the certificate or supply a current profile. If upgrading from a generic certificate pause, open **Settings** and click **Save** to run a fresh verification and get the new detail. |
+| VPN paused after a certificate failure | Read the last VPN error in the activity log and use the checks below. After fixing the cause, save Settings to resume. An existing pause survives an upgrade. |
 | VPN checking after wake | Windows has resumed or restored the display. The app gives networking a few seconds to settle, then tries the saved RDP TCP port through the existing tunnel. If the tunnel route is missing or the target does not respond, the app refreshes the VPN once before testing again. |
 | RDP TCP port refused, reset, or timed out | A refusal or reset is a reply along the network path. Check the saved RDP port, Remote Desktop service, and firewall. A timeout means no reply arrived before the deadline. The remote PC may be asleep or stalled, or the VPN path or a firewall may be blocking traffic. |
 | RDP hostname did not resolve or has no VPN route | Check the registered hostname and VPN DNS. If using a hosts mapping, verify it in **Settings → Remote Desktop**. The app requires a verified VPN route before testing the port. |
 | Entra MFA is pending | Choose **Open Remote Desktop** and complete the prompt in Windows. If the Windows client reports an error, use it to identify the account, host or Conditional Access issue. |
 
 If you need help, share the app version, the exact status message and retry time, and whether Windows Remote Desktop was open. The app keeps the latest 200 diagnostic entries in memory for the current run. Scroll to the bottom to follow new events, or scroll up to read and copy earlier entries. Keep VPN profiles, keys, enrollment material and raw client logs private.
+
+### VPN certificates and TLS
+
+When only one PC fails, compare its clock, OpenVPN Community version, and imported profile with a working PC. Under **Windows Settings → Time & language → Date & time**, check the time zone and sync the clock. Use a fresh profile issued for your account or device. [Windows date and time settings](https://support.microsoft.com/en-us/windows/experience/personalization/set-time-date-and-time-zone-settings-in-windows)
+
+| Activity log message | What to check |
+| --- | --- |
+| Server or CA certificate expired or not yet valid | Sync this PC’s clock. If the date error persists, ask the VPN administrator to check the dates on the server certificate and its issuing chain. |
+| Server name or fingerprint does not match | The server may have rotated certificates, or the profile may lead to a different endpoint. Get a fresh profile and verify the exact certificate name or SHA-256 fingerprint through your administrator. A VPN certificate name can differ from the endpoint DNS name. |
+| Chain, key usage, certificate subject, or revocation problem | Ask the administrator to check the issuing CA, the intermediates the server sends, Server Authentication usage, an OpenVPN-compatible certificate subject, and current revocation lists. A revoked certificate needs replacement. |
+| Client certificate, private key, or PKCS#12 bundle problem | Check the key or bundle passphrase. Ask for a matching client certificate and key, or a fresh PKCS#12 bundle exported with current encryption. The server may also need an updated trust chain for client certificates. |
+| TLS version or crypto mismatch | Ask the administrator to check the endpoint, TLS 1.2 or 1.3 support, and compatible ciphers and signatures with the current OpenVPN release. Legacy certificates or key parameters may need to be replaced. |
+| Control packet rejected or TLS handshake timed out | Check the network and the VPN endpoint and protocol. Ask the administrator to check the matching control-channel key and the server log at the failure time. A client certificate warning can appear earlier in the log. |
+
+To isolate the issue, try the same administrator-issued profile on the affected PC in the standard OpenVPN Community GUI after turning this app’s **Connection** off. Share the redacted activity log message, local timestamp and OpenVPN version with your administrator. Keep identity checks and revocation settings enabled. [OpenVPN TLS configuration](https://openvpn.net/community-docs/community-articles/openvpn-2-7-manual/) · [OpenSSL PKCS#12 compatibility](https://docs.openssl.org/3.0/man1/openssl-pkcs12/)
 
 ## What the app protects
 
@@ -110,15 +125,16 @@ For an Entra embedding test, choose **Embedded ActiveX prototype** with a dedica
 | --- | --- |
 | First run and switches | **Settings required** appears. Turn Auto-start off, leave Connection on, exit and reopen. Verify both values, then repeat with the switches reversed. |
 | Status with taskbar hidden | Use **Ctrl+Shift+F11** or the Start shortcut. Verify the log, preview and actions fit on the current display. |
-| Shareable installer | Use **Save installer…**. Verify its hash matches the release installer. |
+| Release installer | Verify the downloaded installer against the release checksum file and use it on a clean Windows account. |
 | VPN prompts and saved credentials | On a new setup, verify password and seed saving are off. With a saved seed, verify an unsaved password prompts. Save both and verify automatic sign-in. Clear the seed and verify the code prompt returns. Cancel it and verify **Sign in to VPN** opens only one new request. |
 | Unreachable RDP target | Use a closed RDP port on a test host. Verify the VPN stays up, the status shows a retry, and one desktop opens after restoring the port. |
 | Tunnel loss and recovery | Interrupt a test VPN. Verify the app closes its desktop and waits for the VPN. Enter a fresh code when prompted and verify one desktop opens after the route recovers. |
 | Sleep and wake | On a test PC, sleep or hibernate with the tunnel established. On wake, verify that an answering RDP port keeps the existing VPN. With a stale VPN path, verify that the app refreshes the VPN once before checking the port again. Confirm a refused port is reported separately. |
 | Rejected credentials and certificates | Use a test account, a test certificate and a known lockout budget. Verify the retry delay, the pause at the limit, and immediate pause on certificate or classic sign-in rejection. |
 | Entra completion and cancellation | Complete MFA once and cancel it once. Check the embedded sign-in and disconnect events and the native handoff status. Use the tray action to return to the same prompt. |
-| Embedded resizing and closure | Resize the desktop and maximize it for full screen. Use **Ctrl+Shift+F** to go back. Close the signed-in desktop with Connection on and verify the retry status and one reopened desktop. |
+| Embedded resizing and closure | Resize the desktop and maximize it for full screen. Use **Ctrl+Shift+F** to go back. Close the signed-in desktop. Verify that VPN remains connected, the tray offers to reopen RDP, and VPN recovery leaves RDP closed. Reopen it and check that one window appears. |
 | Minimize and preview | Focus the embedded desktop in each view and press **Ctrl+Shift+N**. Check the preview when a frame is available. Use **Open Remote Desktop** and verify the same session returns to its previous view. |
+| Embedded glow | Turn off each glow independently while the desktop is open. Switch between full screen and windowed, then restart the app and verify both choices stayed saved. |
 | Multiple monitors | With two displays connected, verify that the remote Windows display settings show both monitors. Clear the setting and verify the next session uses one. |
 | Local resource redirection | On a target that permits redirection, try a security key, eligible USB device, printer, clipboard text and local drive. Clear each option in Settings and verify it stays off after reconnecting. |
 | Simulate activity | Use an input event viewer on an approved test host. Move the pointer over the embedded desktop after signing in. Verify the 60-second wait after sign-in and focus changes and that focused keyboard or mouse activity postpones simulation. After a minute idle or in the background, check for a small remote pointer movement at most once per minute, with no key or button events and no local pointer movement. Verify that holding a modifier or mouse button suppresses the movement and that the native client receives none. |

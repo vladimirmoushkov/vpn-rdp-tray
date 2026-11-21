@@ -6,7 +6,7 @@ namespace VpnRdpTray;
 internal sealed class RdpWindowGlow : IDisposable
 {
     private const int WindowedExtentDip = 18;
-    private const int FullScreenExtentDip = 5;
+    private const int FullScreenExtentDip = 3;
     private const int ExtendedFrameBounds = 9;
     private const int Popup = unchecked((int)0x80000000);
     private const int Layered = 0x80000, Transparent = 0x20, ToolWindow = 0x80, NoActivate = 0x8000000;

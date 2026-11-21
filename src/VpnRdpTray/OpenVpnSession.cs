@@ -11,7 +11,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace VpnRdpTray;
 
-internal enum FailureKind { Transient, ActionRequired, CredentialRejected, ManualRetry }
+internal enum FailureKind { Transient, ActionRequired, CredentialRejected, ManualRetry, Dismissed }
 internal sealed record Failure(string Reason, FailureKind Kind = FailureKind.Transient, TimeSpan? MinimumDelay = null);
 internal sealed record VpnProgress(string Name, string Detail);
 
@@ -316,6 +316,8 @@ internal static class OpenVpnSession
                     return progress.DescribeNetworkExit(failure);
                 return failure;
             }
+            if (!established && ClientCertificateWarning(line) is { } certificateWarning)
+                progress.ObserveClientCertificateWarning(certificateWarning);
             if (KnownNetworkFailure(line) is { } networkFailure)
                 progress.ObserveNetworkFailure(networkFailure, publish: !established);
             if (!line.StartsWith(">STATE:", StringComparison.Ordinal))
@@ -457,13 +459,18 @@ internal static class OpenVpnSession
 
     private static Failure? KnownNetworkFailure(string line)
     {
-        if (!line.StartsWith(">LOG:", StringComparison.Ordinal) && !line.StartsWith(">FATAL:", StringComparison.Ordinal))
+        var message = ManagementLogMessage(line);
+        if (message.IsEmpty || message.StartsWith("VERIFY ", StringComparison.Ordinal))
             return null;
+        if (message.StartsWith("TLS Error: incoming packet authentication failed", StringComparison.Ordinal) ||
+            message.StartsWith("TLS Error: cannot locate HMAC in incoming packet", StringComparison.Ordinal) ||
+            message.StartsWith("TLS Error: tls-crypt unwrapping failed", StringComparison.Ordinal))
+            return new("OpenVPN could not authenticate a control packet. If this repeats, ask your VPN administrator to check the endpoint and the profile's tls-auth or tls-crypt key.");
         if (line.Contains("Cannot resolve host", StringComparison.OrdinalIgnoreCase) ||
             line.Contains("Cannot resolve address", StringComparison.OrdinalIgnoreCase))
             return new("Windows could not resolve the VPN server. Check DNS or ask your VPN administrator.");
         if (line.Contains("TLS key negotiation failed", StringComparison.OrdinalIgnoreCase))
-            return new($"The VPN server did not complete the TLS handshake. {CheckConnection}");
+            return new("The VPN server did not complete the TLS handshake. Check the network, then ask your VPN administrator to check the endpoint, protocol and server log.");
         if (line.Contains("dco connect timeout", StringComparison.OrdinalIgnoreCase))
             return StateDisconnectReason("dco-connect-timeout");
         if (line.Contains("dco connect error", StringComparison.OrdinalIgnoreCase))
@@ -534,6 +541,9 @@ internal static class OpenVpnSession
         }
 
         internal Failure DescribeNetworkExit(Failure failure) => lastNetworkFailure ?? failure;
+
+        internal void ObserveClientCertificateWarning(string warning) =>
+            Report(new("VPN client certificate warning", warning));
 
         internal Failure DescribeFailure(bool timedOut)
         {
@@ -641,6 +651,17 @@ internal static class OpenVpnSession
     private const string CheckServerCertificate = "Ask your VPN administrator to check the server certificate and provide an updated profile.";
     private const string CheckClientCertificate = "Ask your VPN administrator for a current client certificate and profile.";
     private const string ClientKeyMismatch = "The client certificate and private key in the VPN profile do not match. Import a matched pair from your VPN administrator in Settings.";
+    private const string CheckClock = "Check this PC's date and time.";
+    private const string UnreadableServerName = "OpenVPN could not read the required VPN server certificate subject or name. Ask your VPN administrator to check the certificate's Common Name and export a compatible profile.";
+    private const string TlsVersionMismatch = "OpenVPN and the endpoint could not agree on a TLS version. Ask your VPN administrator to confirm the endpoint and support TLS 1.2 or newer.";
+    private const string TlsCryptoMismatch = "The VPN TLS handshake could not agree on a cipher, signature or key exchange. Ask your VPN administrator for a compatible server configuration and profile.";
+
+    private static string? ClientCertificateWarning(string line) => ManagementLogMessage(line) switch
+    {
+        "WARNING: Your certificate has expired!" => $"OpenVPN reports that this PC's client certificate has expired. {CheckClock} {CheckClientCertificate}",
+        "WARNING: Your certificate is not yet valid!" => $"OpenVPN reports that this PC's client certificate is not yet valid. {CheckClock} {CheckClientCertificate}",
+        _ => null
+    };
 
     private static string? CertificateProblem(string line)
     {
@@ -652,7 +673,12 @@ internal static class OpenVpnSession
             return $"The VPN server certificate fingerprint does not match the saved profile. {CheckServerCertificate}";
         if (message.StartsWith("VERIFY KU ERROR", StringComparison.Ordinal) ||
             message.StartsWith("VERIFY EKU ERROR", StringComparison.Ordinal))
-            return $"The VPN certificate is missing the required server key usage. {CheckServerCertificate}";
+            return $"The VPN server certificate is missing the required key usage or Server Authentication purpose. {CheckServerCertificate}";
+        if (message.StartsWith("TLS Error: Convoluted certificate chain detected", StringComparison.Ordinal))
+            return "The VPN server certificate chain is too long. Ask your VPN administrator to check which certificates the server sends.";
+        if (message.StartsWith("VERIFY ERROR: could not extract ", StringComparison.Ordinal) ||
+            message.StartsWith("VERIFY ERROR: could not append ", StringComparison.Ordinal))
+            return UnreadableServerName;
         if (message.StartsWith("VERIFY ERROR", StringComparison.Ordinal))
             return DescribeServerCertificateError(message);
         if (message.StartsWith("VERIFY CERT ERROR", StringComparison.Ordinal) ||
@@ -672,7 +698,7 @@ internal static class OpenVpnSession
         if (message.StartsWith("Error reading inline PKCS#12 file", StringComparison.Ordinal) ||
             message.StartsWith("Error reading PKCS#12 file", StringComparison.Ordinal) ||
             message.StartsWith("Decoding PKCS12 failed", StringComparison.Ordinal))
-            return "OpenVPN could not open the VPN certificate bundle. Check its passphrase or ask your VPN administrator for a compatible bundle.";
+            return "OpenVPN could not open the VPN certificate bundle (PKCS#12). Check its passphrase or ask your VPN administrator to re-export it with current encryption.";
         if (message.StartsWith("Cannot load inline certificate file", StringComparison.Ordinal) ||
             message.StartsWith("Cannot load certificate file", StringComparison.Ordinal) ||
             message.StartsWith("Cannot load extra-certs file", StringComparison.Ordinal) ||
@@ -687,10 +713,13 @@ internal static class OpenVpnSession
         // OpenVPN writes the verifier's error before the certificate subject and serial. Inspect only that field.
         const string verifyPrefix = "VERIFY ERROR: depth=";
         var reason = ReadOnlySpan<char>.Empty;
+        var certificate = "VPN server certificate";
         if (message.StartsWith(verifyPrefix, StringComparison.Ordinal))
         {
             var result = message[verifyPrefix.Length..];
             int separator = result.IndexOf(',');
+            if (separator >= 0 && int.TryParse(result[..separator], NumberStyles.None, CultureInfo.InvariantCulture, out int depth) && depth > 0)
+                certificate = "CA or intermediate certificate in the VPN server chain";
             const string error = ", error=";
             if (separator >= 0 && result[separator..].StartsWith(error, StringComparison.Ordinal))
             {
@@ -699,25 +728,30 @@ internal static class OpenVpnSession
                 if (subject >= 0)
                     reason = reason[..subject];
             }
+            else if (separator >= 0 && result[separator..].StartsWith(", could not extract X509 ", StringComparison.Ordinal))
+                return UnreadableServerName;
         }
         if (message.SequenceEqual("VERIFY ERROR: CRL not loaded"))
             reason = "unable to get certificate CRL";
 
         return reason switch
         {
-            "certificate has expired" => "A VPN server certificate has expired. Check this PC's date and time, then ask your VPN administrator to renew the certificate.",
-            "certificate is not yet valid" => "A VPN server certificate is not yet valid. Check this PC's date and time, then contact your VPN administrator.",
-            "certificate revoked" => "A VPN server certificate has been revoked. Ask your VPN administrator for a replacement.",
+            "certificate has expired" => $"The {certificate} has expired. {CheckClock} Ask your VPN administrator to renew the certificate.",
+            "certificate is not yet valid" => $"The {certificate} is not yet valid. {CheckClock} Ask your VPN administrator to check the certificate dates.",
+            "certificate revoked" => $"The {certificate} has been revoked. Ask your VPN administrator for a replacement.",
             "CRL has expired" or "CRL is not yet valid" or "unable to get certificate CRL" or "unable to get CRL issuer certificate" =>
                 "OpenVPN could not validate the certificate revocation list. Check this PC's date and time and ask your VPN administrator for an updated profile.",
             "unable to get issuer certificate" or "unable to get local issuer certificate" or "unable to verify the first certificate" or
-            "self-signed certificate" or "self-signed certificate in certificate chain" or "certificate not trusted" =>
-                $"OpenVPN could not establish trust in the VPN server certificate chain. {CheckServerCertificate}",
+            "self-signed certificate" or "self-signed certificate in certificate chain" or "certificate not trusted" or
+            "invalid CA certificate" or "path length constraint exceeded" =>
+                "OpenVPN could not establish trust in the VPN server certificate chain. Ask your VPN administrator to check the server's intermediates and the CA in the profile.",
             "unsuitable certificate purpose" or "key usage does not include certificate signing" or "key usage does not include digital signature" =>
                 $"The VPN certificate chain is missing a required key usage. {CheckServerCertificate}",
             "hostname mismatch" or "IP address mismatch" => $"The VPN server certificate identity does not match the profile. {CheckServerCertificate}",
             "EE certificate key too weak" or "CA certificate key too weak" or "CA signature digest algorithm too weak" =>
                 "The VPN server certificate chain uses a key or signature that OpenVPN rejects. Ask your VPN administrator to replace the certificate chain.",
+            "certificate signature failure" or "unsupported signature algorithm" =>
+                "OpenVPN could not verify a signature in the VPN server certificate chain. Ask your VPN administrator to check or replace the chain.",
             _ => $"OpenVPN could not verify the VPN server certificate. {CheckServerCertificate}"
         };
     }
@@ -752,6 +786,8 @@ internal static class OpenVpnSession
                 "certificate required" or "no certificate" => $"The VPN server requires a client certificate. {CheckClientCertificate}",
                 "bad certificate" or "certificate unknown" or "unsupported certificate" =>
                     $"The VPN server rejected this PC's client certificate. {CheckClientCertificate}",
+                "protocol version" or "inappropriate fallback" => TlsVersionMismatch,
+                "insufficient security" => "The VPN endpoint rejected the TLS security settings. Ask your VPN administrator to check the endpoint and profile against its TLS policy.",
                 _ => null
             };
 
@@ -761,6 +797,12 @@ internal static class OpenVpnSession
                 $"OpenVPN could not verify the VPN server certificate. {CheckServerCertificate}",
             "peer did not return a certificate" => $"The VPN server did not present a certificate. {CheckServerCertificate}",
             "key values mismatch" => ClientKeyMismatch,
+            "ee key too small" or "ca key too small" or "ca md too weak" =>
+                "OpenVPN rejected a weak key or signature while loading the client certificate or its chain. Ask your VPN administrator to reissue it.",
+            "unsupported protocol" or "version too low" or "version too high" => TlsVersionMismatch,
+            "no shared cipher" or "no shared groups" or "no shared signature algorithms" or
+            "no suitable signature algorithm" or "legacy sigalg disallowed or unsupported" => TlsCryptoMismatch,
+            "dh key too small" => "OpenVPN rejected weak Diffie-Hellman parameters. Ask your VPN administrator to update the server's TLS configuration.",
             _ => null
         };
     }

@@ -245,6 +245,26 @@ internal static class Program
         Require(!failure.Reason.Contains(remoteText, StringComparison.Ordinal) &&
             stages.All(stage => !stage.Name.Contains(remoteText, StringComparison.Ordinal) &&
                 !stage.Detail.Contains(remoteText, StringComparison.Ordinal)), "Status never prints the remote diagnostic text");
+
+        stages.Clear();
+        using var certificateInput = new StreamReader(new MemoryStream(Encoding.UTF8.GetBytes($"""
+            >LOG:0,W,WARNING: Your certificate has expired!
+            >LOG:0,,VERIFY OK: depth=0, CN=TLS Error: incoming packet authentication failed from {remoteText}
+            >LOG:0,N,TLS Error: tls-crypt unwrapping failed from {remoteText}
+            >LOG:0,N,TLS Error: TLS key negotiation failed for {remoteText}
+            >FATAL:network error at {remoteText}
+            """)));
+        failure = await OpenVpnSession.MonitorAsync(certificateInput, output, TestVpn,
+            _ => throw new InvalidOperationException(), _ => throw new InvalidOperationException(),
+            _ => { }, startup, startup.Token, new OpenVpnSession.AttemptProgress(stages.Add));
+        Require(stages.Count == 2 &&
+            stages[0] is { Name: "VPN client certificate warning" } &&
+            stages[0].Detail.Contains("client certificate has expired", StringComparison.Ordinal) &&
+            failure is { Kind: FailureKind.Transient } &&
+            failure.Reason.Contains("tls-auth or tls-crypt key", StringComparison.Ordinal) &&
+            !failure.Reason.Contains(remoteText, StringComparison.Ordinal),
+            "Report local certificate warnings without pausing and preserve the separate control-packet failure");
+
         foreach (var (phase, phrase, kind) in new[]
         {
             (OpenVpnSession.VpnPhase.WaitServer, "did not answer", FailureKind.Transient),
@@ -330,6 +350,8 @@ internal static class Program
             {
                 Port = 3389,
                 MultiMonitor = false,
+                InternalGlow = false,
+                ExternalGlow = true,
                 SimulateActivity = true,
                 RedirectSecurityKeys = false,
                 RedirectUsbDevices = false,
@@ -339,6 +361,9 @@ internal static class Program
             } };
             Settings.Save(directory, changed);
             Require(Settings.Load(directory) == changed, "Atomic replacement preserves explicitly disabled RDP options");
+            changed = changed with { Rdp = changed.Rdp with { InternalGlow = true, ExternalGlow = false } };
+            Settings.Save(directory, changed);
+            Require(Settings.Load(directory) == changed, "Internal and external glow can be saved independently");
             Require(Directory.GetFiles(directory).Length == 1, "No temporary setup left");
 
             var legacy = JsonSerializer.SerializeToNode(configuration)!.AsObject();
@@ -352,7 +377,7 @@ internal static class Program
             var legacyRdp = legacy["Rdp"]!.AsObject();
             foreach (var option in new[]
             {
-                nameof(RdpSettings.MultiMonitor), nameof(RdpSettings.RedirectSecurityKeys),
+                nameof(RdpSettings.MultiMonitor), nameof(RdpSettings.InternalGlow), nameof(RdpSettings.ExternalGlow), nameof(RdpSettings.RedirectSecurityKeys),
                 nameof(RdpSettings.RedirectUsbDevices), nameof(RdpSettings.RedirectPrinters),
                 nameof(RdpSettings.RedirectClipboard), nameof(RdpSettings.RedirectDrives), nameof(RdpSettings.SimulateActivity)
             })
@@ -362,7 +387,7 @@ internal static class Program
             var legacyConfiguration = Settings.Load(directory)!;
             Require(legacyConfiguration.Rdp is
             {
-                MultiMonitor: true, RedirectSecurityKeys: true, RedirectUsbDevices: true,
+                MultiMonitor: true, InternalGlow: true, ExternalGlow: true, RedirectSecurityKeys: true, RedirectUsbDevices: true,
                 RedirectPrinters: true, RedirectClipboard: true, RedirectDrives: true, SimulateActivity: false
             }, "Existing profiles keep display and resource defaults and activity stays off");
             byte[] migrated = ProtectedData.Unprotect(File.ReadAllBytes(Settings.ConfigPath(directory)), null, DataProtectionScope.CurrentUser);
@@ -448,8 +473,10 @@ internal static class Program
         (string Message, string Expected)[] certificateCases =
         [
             ($">LOG:0,N,VERIFY ERROR: depth=0, error=certificate has expired: {privateFields}", "expired"),
-            ($">LOG:0,N,VERIFY ERROR: depth=1, error=certificate is not yet valid: {privateFields}", "not yet valid"),
+            ($">LOG:0,N,VERIFY ERROR: depth=1, error=certificate is not yet valid: {privateFields}", "intermediate certificate in the VPN server chain is not yet valid"),
             ($">LOG:0,N,VERIFY ERROR: depth=0, error=unable to get local issuer certificate: {privateFields}", "certificate chain"),
+            ($">LOG:0,N,VERIFY ERROR: depth=0, could not extract X509 subject string from certificate: {privateFields}", "Common Name"),
+            ($">LOG:0,N,VERIFY ERROR: could not extract CN from X509 subject string ('{privateFields}')", "Common Name"),
             ($">LOG:0,N,VERIFY ERROR: depth=0, error=certificate revoked: {privateFields}", "revoked"),
             (">LOG:0,N,VERIFY ERROR: CRL not loaded", "revocation list"),
             ($">LOG:0,N,VERIFY X509NAME ERROR: {privateFields}", "name does not match"),
@@ -457,6 +484,10 @@ internal static class Program
             ($">LOG:0,N,VERIFY EKU ERROR: {privateFields}", "key usage"),
             ($">LOG:0,N,OpenSSL: error:0A000418:SSL routines::tlsv1 alert unknown ca: {privateFields}", "does not trust the issuer"),
             ($">LOG:0,N,OpenSSL: error:0A00045C:SSL routines::tlsv13 alert certificate required: {privateFields}", "requires a client certificate"),
+            ($">LOG:0,N,OpenSSL: error:0A00018E:SSL routines::ca md too weak: {privateFields}", "rejected a weak key or signature"),
+            ($">LOG:0,N,OpenSSL: error:0A00042E:SSL routines::tlsv1 alert protocol version: {privateFields}", "agree on a TLS version"),
+            ($">LOG:0,N,OpenSSL: error:0A0000C1:SSL routines::no shared cipher: {privateFields}", "agree on a cipher"),
+            ($">LOG:0,W,Decoding PKCS12 failed. Probably wrong password or unsupported/legacy encryption: {privateFields}", "re-export it with current encryption"),
             ($">FATAL:Cannot load inline certificate file {privateFields}", "client certificate"),
             ($">FATAL:Cannot load CA certificate file [[INLINE]] {privateFields}", "CA certificates")
         ];
@@ -469,6 +500,9 @@ internal static class Program
         }
         Require(OpenVpnSession.Classify(">LOG:0,,VERIFY OK: depth=0, CN=VERIFY ERROR AUTH_FAILED") is null,
             "Do not classify certificate subject content as a verification or login failure");
+        Require(OpenVpnSession.Classify(">LOG:0,W,VERIFY WARNING: depth=1, unable to get certificate CRL: fixture") is null &&
+            OpenVpnSession.Classify(">LOG:0,W,WARNING: Your certificate is not yet valid!") is null,
+            "Warnings alone do not pause a connection");
         var command = OpenVpnSession.EncodeCredential("password \"Auth\" ", "text\\\"", "000042");
         try { Require(Encoding.UTF8.GetString(command) == "password \"Auth\" \"text\\\\\\\"000042\"\n", "Escaping and appending a six-digit code"); }
         finally { CryptographicOperations.ZeroMemory(command); }
@@ -607,9 +641,17 @@ internal static class Program
             "Report an expired Remote Desktop certificate separately from a VPN certificate");
         Require(HostedRdpSession.DescribeDisconnect(3335, false, false, true).Kind == FailureKind.CredentialRejected, "RDP locked account");
         Require(HostedRdpSession.DescribeDisconnect(264, false, false, true).Kind == FailureKind.Transient, "RDP timeout");
-        Require(HostedRdpSession.DescribeDisconnect(1, false, true, false).Kind == FailureKind.ManualRetry, "RDP prompt canceled");
-        Require(HostedRdpSession.DescribeDisconnect(1, true, false, false).Kind == FailureKind.Transient, "Signed-in RDP window closes and retries");
-        Require(HostedRdpSession.DescribeDisconnect(2, true, false, false).Kind == FailureKind.Transient, "Signed-in RDP disconnects and retries");
+        Require(HostedRdpSession.DescribeDisconnect(1, false, true, false).Kind == FailureKind.Dismissed,
+            "Canceling the embedded sign-in prompt requires an explicit reopen");
+        Require(HostedRdpSession.DescribeDisconnect(1, true, false, false).Kind == FailureKind.Dismissed,
+            "Closing the signed-in embedded desktop requires an explicit reopen");
+        Require(HostedRdpSession.DescribeDisconnect(2, true, false, false).Kind == FailureKind.Transient &&
+            HostedRdpSession.DescribeDisconnect(2308, true, false, false).Kind == FailureKind.Transient,
+            "Remote disconnects and network failures still retry");
+        Require(NativeRdpSession.DescribeExit(0).Kind == FailureKind.Dismissed &&
+            NativeRdpSession.DescribeExit(11) is { Kind: FailureKind.Dismissed } ended &&
+            ended.Reason.Contains("code 11", StringComparison.Ordinal),
+            "Native client exits wait for an explicit reopen and preserve an observable exit code");
         var display = RdpActiveX.DisplaySize(new Size(1933, 1080));
         Require(display.Width % 2 == 0 && Math.Abs(display.Width - 1933) <= 1 && display.Height == 1080,
             "RDP desktop resolution follows the pixel viewport");
@@ -662,8 +704,8 @@ internal static class Program
         Require(Alpha(0) == 0 && Alpha(18) == 0, "Window interior and outer edge remain transparent");
 
         int extent = RdpWindowGlow.FullScreenExtent(216);
-        Require(RdpWindowGlow.FullScreenExtent(96) == 5 && extent == 12,
-            "The five-DIP full-screen glow scales with the monitor DPI");
+        Require(RdpWindowGlow.FullScreenExtent(96) == 3 && extent == 7,
+            "The three-DIP full-screen glow scales with the monitor DPI");
         const int width = 40, height = 30;
         nint surface = Marshal.AllocHGlobal(width * height * sizeof(int));
         try
@@ -673,7 +715,7 @@ internal static class Program
             int edge = AlphaAt(0, height / 2);
             int faded = AlphaAt(extent - 1, height / 2);
             Require(edge is >= 200 and < 255 && edge > faded && faded > 0 &&
-                AlphaAt(extent, height / 2) == 0, "Full-screen glow begins visibly at the edge and fades over five DIPs");
+                AlphaAt(extent, height / 2) == 0, "Full-screen glow begins visibly at the edge and fades over three DIPs");
             Require(AlphaAt(width / 2, 0) == edge && AlphaAt(width - 1, height / 2) == edge &&
                 AlphaAt(width / 2, height - 1) == edge && AlphaAt(width - 1, height - 1) == edge &&
                 AlphaAt(width / 2, height / 2) == 0, "The full-screen glow covers all edges and leaves the center clear");
@@ -755,6 +797,21 @@ internal static class Program
         Require(ready && credentialsRequested && stages.Any(stage => stage.Name == "VPN starting server connection"),
             $"Verified local password acknowledgement and a loopback connection [{string.Join(", ", stages.Select(stage => stage.Name))}]");
         Console.WriteLine("The Interactive Service launched OpenVPN, authenticated management, acknowledged a synthetic credential, opened a loopback connection and cleaned up.");
+
+        using var rejectStop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        const string malformedCa = "synthetic malformed CA fixture";
+        var invalidProfile = settings with
+        {
+            Profile = profile.Replace(certificate.ExportCertificatePem(), malformedCa, StringComparison.Ordinal)
+        };
+        var rejection = await OpenVpnSession.RunAsync(invalidProfile,
+            _ => Task.FromResult<VpnAuthentication?>(new(null, "000042")),
+            _ => throw new InvalidOperationException("Unexpected key prompt in the test profile."),
+            tunnel => Require(tunnel is null, "The malformed CA never establishes a tunnel"), rejectStop.Token);
+        Require(rejection is { Kind: FailureKind.ActionRequired } &&
+            rejection.Reason.Contains("could not load the CA certificates", StringComparison.Ordinal) &&
+            !rejection.Reason.Contains(malformedCa, StringComparison.Ordinal), "OpenVPN's real certificate-load error is actionable and redacted");
+        Console.WriteLine("OpenVPN rejected a malformed CA passed through the Interactive Service with an actionable, redacted diagnostic.");
     }
 
     private static void Require(bool condition, string check)

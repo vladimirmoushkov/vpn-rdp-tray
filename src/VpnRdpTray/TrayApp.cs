@@ -75,7 +75,7 @@ internal sealed class TrayApp : ApplicationContext
             else if (closed && vpn.Name == "VPN connected")
             {
                 icon.ShowBalloonTip(4500, "Remote Desktop closed",
-                    rdp.RetryAt is null ? "Choose Open Remote Desktop to try again." : "Reconnecting through the VPN.",
+                    ConnectionController.RdpReopenTip,
                     ToolTipIcon.Info);
             }
         });
@@ -285,7 +285,7 @@ internal sealed class TrayApp : ApplicationContext
         window.Activate();
     }
 
-    private async Task<string?> SaveConfigurationAsync(Configuration candidate)
+    private async Task<string?> SaveConfigurationAsync(Configuration candidate, bool glowOnly)
     {
         if (busy || exiting)
             return "Wait for the current connection change, then save again.";
@@ -295,12 +295,21 @@ internal sealed class TrayApp : ApplicationContext
         UpdateMenu();
         try
         {
-            await controller.StopAsync();
-            await MachineSetup.SetHostsAsync(candidate.Rdp);
+            if (!glowOnly)
+            {
+                await controller.StopAsync();
+                await MachineSetup.SetHostsAsync(candidate.Rdp);
+            }
             Settings.Save(Settings.DirectoryPath, candidate);
             savedToDisk = true;
             hasConfiguration = true;
             loadFailure = null;
+            if (glowOnly)
+            {
+                controller.SetRdpGlow(candidate.Rdp.InternalGlow, candidate.Rdp.ExternalGlow);
+                AddLog("APP", "OK", "Remote Desktop glow settings saved.");
+                return null;
+            }
             Settings.VpnAction = null;
             Settings.VpnRejections = 0;
             Settings.VpnNotBefore = null;
@@ -322,6 +331,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             busy = false;
             if (exitPending) await ExitAsync();
+            else if (glowOnly) UpdateMenu();
             else StartConnection();
         }
     }

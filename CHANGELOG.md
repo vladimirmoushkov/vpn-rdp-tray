@@ -4,6 +4,7 @@ The [Releases page](../../releases) contains the current release, the recovered 
 
 | Version | Changes |
 | --- | --- |
+| **1.0.23** | Added more specific VPN certificate and TLS diagnostics. Added separate switches for the embedded desktop’s internal and external glow and removed the installer export button from Settings. Closing Remote Desktop now pauses it for the current app run until you reopen it. |
 | **1.0.22** | Fixed the activity log at its 200-entry limit. It now removes expired rows and adds new ones while preserving the reader's scroll position and selection. |
 | **1.0.21** | Added VPN recovery after Windows wakes. The app tests the configured Remote Desktop TCP port through the existing tunnel and refreshes the tunnel once if the path appears stale. Added distinct RDP port and VPN certificate diagnostics. |
 | **1.0.20** | Replaced the duplicate status box and button row with VPN and RDP controls above the preview. RDP can be turned off without interrupting the VPN. Clicking the preview opens the existing session. |
@@ -11,8 +12,8 @@ The [Releases page](../../releases) contains the current release, the recovered 
 | **1.0.18** | Made optional activity simulation wait at least a minute after sign-in or a focus change. A focused desktop also had to be idle before sending a Shift tap. |
 | **1.0.17** | Shortened the status window and preview while retaining readable log text. Added a shared app and installer icon and made the next available action easier to find. |
 | **1.0.16** | Made OpenVPN acknowledge each local management command before the next command is sent. Added a distinct failure reason when local credential delivery stalls. |
-| **1.0.15** | Renamed Setup to Settings and introduced the two-pane status window with a timestamped log, animated connection stages, and a scaled preview of the embedded desktop. |
-| **1.0.14** | Added phase-specific OpenVPN timeouts, separate VPN and RDP progress, and clearer diagnostics for retries and failures. |
+| **1.0.15** | Renamed the remaining Setup actions to Settings. Introduced the two-pane status window with a timestamped log, animated connection stages, and a scaled preview of the embedded desktop. |
+| **1.0.14** | Added phase-specific OpenVPN timeouts and separate messages for DNS, refused connections, TLS handshakes, and route failures. Added separate VPN and RDP progress and titled the configuration dialog Settings. |
 | **1.0.13** | Restored optional automatic TOTP generation from a separately encrypted enrollment seed. Added an opt-in activity timer for the embedded desktop. |
 | **1.0.12** | Used manually entered TOTP codes and removed any previously saved seed from the active settings file. Made saving the VPN password, private-key passphrase, and classic RDP password separate opt-ins. |
 | **1.0.11** | Prepared a release candidate for GitHub. Kept saved values out of the Settings fields, cleared temporary credential buffers, and required an exact VPN server certificate name or fingerprint. |

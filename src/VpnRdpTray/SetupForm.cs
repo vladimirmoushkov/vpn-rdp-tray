@@ -8,7 +8,6 @@ namespace VpnRdpTray;
 
 internal sealed class SetupForm : Form
 {
-    private static readonly string ShareableInstallerPath = Path.Combine(AppContext.BaseDirectory, "shareable-setup.exe");
     private readonly TabControl tabs = new() { Dock = DockStyle.Fill };
     private readonly CheckBox startAtSignIn = Check("Start VPN Remote Desktop when I sign in to Windows");
     private readonly TextBox vpnUser = Input();
@@ -33,6 +32,8 @@ internal sealed class SetupForm : Form
     private readonly ComboBox entraClient = Choice("Remote Desktop Connection (mstsc)", "Embedded ActiveX prototype");
     private readonly CheckBox hosts = Check("Add the hostname and IP to Windows hosts (administrator approval)");
     private readonly CheckBox multiMonitor = Check("Use all monitors in full screen", isChecked: true);
+    private readonly CheckBox internalGlow = Check("Internal glow (full screen)", isChecked: true);
+    private readonly CheckBox externalGlow = Check("External glow (windowed)", isChecked: true);
     private readonly CheckBox simulateActivity = Check("Simulate activity (embedded Remote Desktop only)");
     private readonly CheckBox redirectSecurityKeys = Check("Smart cards and security keys (YubiKey/FIDO2)", isChecked: true);
     private readonly CheckBox redirectUsbDevices = Check("Supported local USB devices", isChecked: true);
@@ -49,8 +50,7 @@ internal sealed class SetupForm : Form
     private readonly Button selectProfile = Button("Import .ovpn…");
     private readonly Button install = Button("Install OpenVPN…");
     private readonly Button prepare = Button("Prepare this Windows account…");
-    private readonly Button saveInstaller = Button("Save installer…");
-    private readonly Func<Configuration, Task<string?>> saveConfiguration;
+    private readonly Func<Configuration, bool, Task<string?>> saveConfiguration;
     private readonly Func<bool, bool>? setAutoStart;
     private string? importedProfile;
     private VpnSettings? savedVpn;
@@ -58,7 +58,7 @@ internal sealed class SetupForm : Form
     private bool autoStartEnabled;
     private bool busy;
 
-    internal SetupForm(Configuration? current, Func<Configuration, Task<string?>> saveConfiguration,
+    internal SetupForm(Configuration? current, Func<Configuration, bool, Task<string?>> saveConfiguration,
         bool autoStart = true, Func<bool, bool>? setAutoStart = null)
     {
         SuspendLayout();
@@ -84,7 +84,6 @@ internal sealed class SetupForm : Form
         selectProfile.Click += (_, _) => ImportProfile();
         install.Click += async (_, _) => await UpdateOpenVpnAsync(installing: true);
         prepare.Click += async (_, _) => await UpdateOpenVpnAsync(installing: false);
-        saveInstaller.Click += (_, _) => SaveShareableInstaller();
         SetAutoStart(autoStart);
         startAtSignIn.Enabled = setAutoStart is not null;
         startAtSignIn.CheckedChanged += (_, _) => ChangeAutoStart();
@@ -95,7 +94,6 @@ internal sealed class SetupForm : Form
         Row(app, "OpenVPN Interactive Service", serviceStatus);
         Row(app, "Windows account", Inline(accountStatus, prepare));
         Row(app, "", Hint("The Interactive Service helps bring up the VPN tunnel. Installing OpenVPN or preparing this account requires administrator approval."));
-        Row(app, "Shareable installer", saveInstaller);
         AddTab("App and OpenVPN", app);
 
         var vpn = Grid();
@@ -128,6 +126,7 @@ internal sealed class SetupForm : Form
         Row(rdp, "Classic password", rdpPassword);
         Row(rdp, "", hosts);
         Row(rdp, "", multiMonitor);
+        Row(rdp, "Embedded desktop glow", Inline(internalGlow, externalGlow));
         Row(rdp, "", simulateActivity);
         Row(rdp, "", Hint("Move the pointer over the remote desktop once after sign-in. The app can then nudge it at most once a minute, after a minute in the background or a minute without input while focused. Server session limits still apply."));
         Row(rdp, "Redirect to remote PC", redirectSecurityKeys);
@@ -285,6 +284,8 @@ internal sealed class SetupForm : Form
         rdpUser.Text = current.Rdp.Username;
         hosts.Checked = current.Rdp.WindowsHosts;
         multiMonitor.Checked = current.Rdp.MultiMonitor;
+        internalGlow.Checked = current.Rdp.InternalGlow;
+        externalGlow.Checked = current.Rdp.ExternalGlow;
         simulateActivity.Checked = current.Rdp.SimulateActivity;
         redirectSecurityKeys.Checked = current.Rdp.RedirectSecurityKeys;
         redirectUsbDevices.Checked = current.Rdp.RedirectUsbDevices;
@@ -326,7 +327,7 @@ internal sealed class SetupForm : Form
                 ? "Saved. Blank keeps it for the same target and account." : "Enter the Remote Desktop password",
             entra ? "Windows handles Entra sign-in" : "Windows handles Remote Desktop sign-in");
         entraClient.Enabled = entra;
-        simulateActivity.Enabled = !entra || entraClient.SelectedIndex == 1;
+        internalGlow.Enabled = externalGlow.Enabled = simulateActivity.Enabled = !entra || entraClient.SelectedIndex == 1;
         ipHelp.Text = entra ? "Entra connects by hostname. Use the IP to diagnose reachability or populate Windows hosts."
             : "If hostname connection is unavailable, Windows can use a routed IP with a matching certificate.";
     }
@@ -357,39 +358,6 @@ internal sealed class SetupForm : Form
             SetStatus(requested ? "The app will start when you sign in to Windows." : "Windows sign-in startup is off.");
         else
             SetStatus("Windows could not update the sign-in startup setting.", error: true);
-    }
-
-    private void SaveShareableInstaller()
-    {
-        if (!File.Exists(ShareableInstallerPath))
-        {
-            SetStatus("This installation has no shareable copy. Use the original installer you downloaded.", error: true);
-            return;
-        }
-
-        try
-        {
-            using var dialog = new SaveFileDialog
-            {
-                Title = "Save a copy of the installer",
-                Filter = "Windows installer (*.exe)|*.exe",
-                FileName = "VpnRdpTray-Setup-x64.exe",
-                DefaultExt = "exe",
-                AddExtension = true,
-                RestoreDirectory = true
-            };
-            if (dialog.ShowDialog(this) != DialogResult.OK)
-                return;
-
-            File.Copy(ShareableInstallerPath, dialog.FileName, overwrite: true);
-            SetStatus("Installer saved.");
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or SecurityException)
-        { SetStatus("Windows denied access while saving the installer. Choose a folder you can write to.", error: true); }
-        catch (Exception ex) when (ex is IOException or ArgumentException or ExternalException)
-        {
-            SetStatus("Windows could not save the installer. Check free space, close any open copy, or choose a different location.", error: true);
-        }
     }
 
     private void ImportProfile()
@@ -570,6 +538,8 @@ internal sealed class SetupForm : Form
                 password, hosts.Checked, entra && entraClient.SelectedIndex == 1)
             {
                 MultiMonitor = multiMonitor.Checked,
+                InternalGlow = internalGlow.Checked,
+                ExternalGlow = externalGlow.Checked,
                 SimulateActivity = simulateActivity.Checked,
                 RedirectSecurityKeys = redirectSecurityKeys.Checked,
                 RedirectUsbDevices = redirectUsbDevices.Checked,
@@ -578,9 +548,11 @@ internal sealed class SetupForm : Form
                 RedirectDrives = redirectDrives.Checked
             };
 
-            SetStatus(hosts.Checked || savedRdp?.WindowsHosts == true
+            bool glowOnly = savedVpn == vpn && savedRdp is { } previous && previous != rdp &&
+                previous == (rdp with { InternalGlow = previous.InternalGlow, ExternalGlow = previous.ExternalGlow });
+            SetStatus(!glowOnly && (hosts.Checked || savedRdp?.WindowsHosts == true)
                 ? "Checking Windows hosts settings. Approve the administrator prompt if Windows asks." : "Saving settings…");
-            var warning = await saveConfiguration(new Configuration(vpn, rdp));
+            var warning = await saveConfiguration(new Configuration(vpn, rdp), glowOnly);
             if (warning is not null)
             {
                 SetStatus(warning, error: true);

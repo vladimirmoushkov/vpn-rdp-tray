@@ -97,6 +97,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private FullScreenExitPlacement? exitDock = Settings.FullScreenExitDock, dragDock;
     private bool multiMonitorConfirmed, authenticationDialogOpen;
     private bool signedIn, warningSeen, closing, fullScreen, fullScreenShortcutDown, minimizeShortcutDown;
+    private bool internalGlow, externalGlow;
 
     internal HostedRdpSession(RdpEndpoint endpoint, RdpSettings settings, bool foreground, Action<string, bool> report)
     {
@@ -114,6 +115,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         };
         control = new RdpActiveX();
         windowGlow = new RdpWindowGlow(window, control);
+        (internalGlow, externalGlow) = (settings.InternalGlow, settings.ExternalGlow);
         if (settings.SimulateActivity)
         {
             activityPointer = new();
@@ -265,7 +267,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             };
             window.FormClosing += (_, args) =>
             {
-                if (closing || args.CloseReason == CloseReason.WindowsShutDown)
+                if (closing || args.CloseReason != CloseReason.UserClosing)
                     return;
                 args.Cancel = true;
                 CompleteSession(WindowClosed(signedIn));
@@ -630,8 +632,14 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         RefreshWindowGlow();
     }
 
+    internal void SetGlow(bool showInternal, bool showExternal)
+    {
+        (internalGlow, externalGlow) = (showInternal, showExternal);
+        RefreshWindowGlow();
+    }
+
     private void RefreshWindowGlow() =>
-        windowGlow.Refresh(!closing && !completion.Task.IsCompleted, fullScreen);
+        windowGlow.Refresh(!closing && !completion.Task.IsCompleted && (fullScreen ? internalGlow : externalGlow), fullScreen);
 
     internal static bool IsClientException(Exception ex) =>
         ex is COMException or RuntimeBinderException or InvalidOperationException or InvalidCastException or Win32Exception;
@@ -683,7 +691,9 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         1030 or 1286 or 1542 or 2310 or 2566 or 2822 or 3078 =>
             new($"RDP could not establish a secure session (RDP code {code}). Ask your administrator to check the remote computer's security configuration.",
                 FailureKind.ActionRequired),
-        1 or 2 => WindowClosed(signedIn),
+        1 => WindowClosed(signedIn),
+        2 when signedIn => new("A user ended the session on the remote computer."),
+        2 => new("The remote computer ended the connection before sign-in completed. Choose Open Remote Desktop to retry.", FailureKind.ManualRetry),
         3 when signedIn => new("The remote computer ended the RDP session. Ask your administrator to check session limits if this repeats."),
         _ when !signedIn && savedPassword =>
             new($"RDP sign-in failed (RDP code {code}). Review the account in Settings and share the code with your administrator if it repeats.",
@@ -692,8 +702,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     };
 
     private static Failure WindowClosed(bool signedIn) => signedIn
-        ? new("RDP window closed")
-        : new("The RDP window closed before sign-in completed. Choose Open Remote Desktop to sign in again.", FailureKind.ManualRetry);
+        ? new(ConnectionController.RdpClosedStatus, FailureKind.Dismissed)
+        : new("The RDP window closed before sign-in completed.", FailureKind.Dismissed);
 
     public void Dispose()
     {
@@ -1034,9 +1044,7 @@ internal sealed class NativeRdpSession : IRdpSession
         try
         {
             await process.WaitForExitAsync();
-            return new(process.ExitCode == 0
-                ? "Remote Desktop closed. Choose Open Remote Desktop to sign in again."
-                : $"Remote Desktop closed with code {process.ExitCode}. Choose Open Remote Desktop and check for a Windows error.", FailureKind.ManualRetry);
+            return DescribeExit(process.ExitCode);
         }
         catch (InvalidOperationException)
         { return new("Remote Desktop closed. Choose Open Remote Desktop to sign in again.", FailureKind.ManualRetry); }
@@ -1046,6 +1054,11 @@ internal sealed class NativeRdpSession : IRdpSession
                 FailureKind.ManualRetry);
         }
     }
+
+    // The native client's exit confirms its window has ended; sign-in and cancellation details stay in Windows.
+    internal static Failure DescribeExit(int code) => code == 0
+        ? new(ConnectionController.RdpClosedStatus, FailureKind.Dismissed)
+        : new($"Remote Desktop closed with code {code}. Check the Windows client for sign-in or connection errors.", FailureKind.Dismissed);
 
     public Task<Failure> Completion { get; }
 
