@@ -4,6 +4,8 @@ If you use OpenVPN to reach the same Windows desktop every day, this app connect
 
 If only Remote Desktop fails, the app keeps the VPN up while it retries. If the VPN drops, it closes the desktop it opened and waits for the tunnel to recover. Windows handles Remote Desktop sign-in and any Microsoft Entra MFA prompt.
 
+See the [version history](CHANGELOG.md) for changes across builds and links to archived releases.
+
 ## Install and connect
 
 You need Windows 11 x64, an OpenVPN profile from your VPN administrator, and the hostname and account you normally use for Remote Desktop.

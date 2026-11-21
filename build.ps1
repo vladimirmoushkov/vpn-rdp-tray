@@ -29,7 +29,7 @@ function New-SourceArchive([string] $ArchivePath) {
         'THIRD-PARTY-NOTICES.md', 'installer\VpnRdpTray.iss', 'src\VpnRdpTray\app.manifest', 'src\VpnRdpTray\app.ico',
         'src\VpnRdpTray\UpdateMachine.ps1'
     )
-    foreach ($optional in @('LICENSE', '.gitattributes')) {
+    foreach ($optional in @('LICENSE', '.gitattributes', 'CHANGELOG.md')) {
         if (Test-Path -LiteralPath $optional -PathType Leaf) { $files += $optional }
     }
     foreach ($directory in @('src\VpnRdpTray', 'tests\VpnRdpTray.Tests')) {
