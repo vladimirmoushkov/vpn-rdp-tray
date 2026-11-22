@@ -4,6 +4,7 @@ The [Releases page](../../releases) contains the current release, the recovered 
 
 | Version | Changes |
 | --- | --- |
+| **1.0.24** | Moved both glow switches to the first Settings tab. Configured the embedded and native RDP clients to send Windows shortcuts such as Alt+Tab and Win+Tab to the focused remote desktop in windowed and full-screen views. |
 | **1.0.23** | Added more specific VPN certificate and TLS diagnostics. Added separate switches for the embedded desktop’s internal and external glow and removed the installer export button from Settings. Closing Remote Desktop now pauses it for the current app run until you reopen it. |
 | **1.0.22** | Fixed the activity log at its 200-entry limit. It now removes expired rows and adds new ones while preserving the reader's scroll position and selection. |
 | **1.0.21** | Added VPN recovery after Windows wakes. The app tests the configured Remote Desktop TCP port through the existing tunnel and refreshes the tunnel once if the path appears stale. Added distinct RDP port and VPN certificate diagnostics. |

@@ -71,6 +71,9 @@ internal sealed class RdpActiveX() : AxHost("1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B
         Client.UserName = separator < 0 ? user : user[(separator + 1)..];
         Client.Domain = separator < 0 ? "" : user[..separator];
 
+        // The host manages full screen. Route Windows shortcuts while the control has focus in either view.
+        Client.SecuredSettings2.KeyboardHookMode = 1;
+
         dynamic settings = Client.AdvancedSettings9;
         settings.RDPPort = port;
         settings.AuthenticationLevel = 1u;
@@ -139,6 +142,8 @@ internal sealed class RdpActiveX() : AxHost("1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B
             advanced.RedirectDrives == options.RedirectDrives &&
             dynamicDrives == options.RedirectDrives && dynamicDevices == options.RedirectUsbDevices;
     }
+
+    internal bool RedirectsWindowsShortcuts => Client.SecuredSettings2.KeyboardHookMode == 1;
 
     internal static Size DisplaySize(Size viewport) =>
         new(Math.Clamp(viewport.Width, 200, 8192) & ~1, Math.Clamp(viewport.Height, 200, 8192));
@@ -316,6 +321,9 @@ internal static class RdpPrototype
             stage = "configure Entra authentication";
             rdp.Configure("prototype.invalid", 3389, "prototype@example.invalid", null, entra: true,
                 RdpActiveX.DisplaySize(rdp.ClientSize), rdp.DeviceDpi);
+            stage = "confirm Entra keyboard shortcut redirection";
+            if (!rdp.RedirectsWindowsShortcuts)
+                throw new InvalidOperationException("The Entra control did not accept keyboard shortcut redirection.");
             stage = "configure classic NLA and certificate validation";
             using var classic = new RdpActiveX();
             ((ISupportInitialize)classic).BeginInit();
@@ -324,7 +332,10 @@ internal static class RdpPrototype
             _ = classic.Handle;
             classic.Configure("prototype.invalid", 3389, @"DOMAIN\prototype", null, entra: false,
                 RdpActiveX.DisplaySize(classic.ClientSize), classic.DeviceDpi);
-            Console.WriteLine("ActiveX activation, event binding, scoped pointer input, redirections and Entra/classic settings succeeded.");
+            stage = "confirm classic keyboard shortcut redirection";
+            if (!classic.RedirectsWindowsShortcuts)
+                throw new InvalidOperationException("The classic control did not accept keyboard shortcut redirection.");
+            Console.WriteLine("ActiveX activation, event binding, scoped pointer input, device and keyboard redirections, and Entra/classic settings succeeded.");
             return 0;
         }
         catch (Exception ex)

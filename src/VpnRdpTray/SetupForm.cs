@@ -90,6 +90,7 @@ internal sealed class SetupForm : Form
 
         var app = Grid();
         Row(app, "Windows startup", startAtSignIn);
+        Row(app, "Embedded desktop glow", Inline(internalGlow, externalGlow));
         Row(app, "OpenVPN Community", Inline(openVpnStatus, install));
         Row(app, "OpenVPN Interactive Service", serviceStatus);
         Row(app, "Windows account", Inline(accountStatus, prepare));
@@ -126,7 +127,6 @@ internal sealed class SetupForm : Form
         Row(rdp, "Classic password", rdpPassword);
         Row(rdp, "", hosts);
         Row(rdp, "", multiMonitor);
-        Row(rdp, "Embedded desktop glow", Inline(internalGlow, externalGlow));
         Row(rdp, "", simulateActivity);
         Row(rdp, "", Hint("Move the pointer over the remote desktop once after sign-in. The app can then nudge it at most once a minute, after a minute in the background or a minute without input while focused. Server session limits still apply."));
         Row(rdp, "Redirect to remote PC", redirectSecurityKeys);
@@ -327,7 +327,7 @@ internal sealed class SetupForm : Form
                 ? "Saved. Blank keeps it for the same target and account." : "Enter the Remote Desktop password",
             entra ? "Windows handles Entra sign-in" : "Windows handles Remote Desktop sign-in");
         entraClient.Enabled = entra;
-        internalGlow.Enabled = externalGlow.Enabled = simulateActivity.Enabled = !entra || entraClient.SelectedIndex == 1;
+        simulateActivity.Enabled = !entra || entraClient.SelectedIndex == 1;
         ipHelp.Text = entra ? "Entra connects by hostname. Use the IP to diagnose reachability or populate Windows hosts."
             : "If hostname connection is unavailable, Windows can use a routed IP with a matching certificate.";
     }

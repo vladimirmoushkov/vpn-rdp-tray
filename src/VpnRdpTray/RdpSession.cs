@@ -629,6 +629,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             }
         }
         window.Activate();
+        if (signedIn && !authenticationDialogOpen && HasForeground() == true)
+            control.Focus();
         RefreshWindowGlow();
     }
 
@@ -1021,6 +1023,7 @@ internal sealed class NativeRdpSession : IRdpSession
             $"username:s:{user}",
             useMultiMonitor ? "screen mode id:i:2" : "screen mode id:i:1",
             useMultiMonitor ? "use multimon:i:1" : "use multimon:i:0",
+            "keyboardhook:i:1",
             "desktopwidth:i:1280",
             "desktopheight:i:800",
             "enablerdsaadauth:i:1",

@@ -666,6 +666,13 @@ internal static class Program
     private static void TestNativeRedirectionSettings()
     {
         var endpoint = new RdpEndpoint(TestRdp.Host, [IPAddress.Parse(TestRdp.Ip!)], TestRdp.Port);
+        foreach (var multiMonitorAvailable in new[] { false, true })
+        {
+            var profile = NativeRdpSession.RdpFile(endpoint, TestRdp with { MultiMonitor = true }, multiMonitorAvailable);
+            var keyboard = profile.Split("\r\n").Where(line => line.StartsWith("keyboardhook:", StringComparison.Ordinal));
+            Require(keyboard.SequenceEqual(["keyboardhook:i:1"]),
+                "Native RDP routes Windows shortcuts to the focused desktop in windowed and multi-monitor views");
+        }
         var cases = new (RdpSettings Settings, string[] EnabledLines, string[] DisabledLines)[]
         {
             (TestRdp with { RedirectSecurityKeys = false }, ["redirectsmartcards:i:1", "redirectwebauthn:i:1"],
