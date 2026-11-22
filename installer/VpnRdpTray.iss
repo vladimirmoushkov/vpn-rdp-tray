@@ -8,7 +8,7 @@
 [Setup]
 AppId={{38428A31-ACFF-4C28-9A4F-427613E1F137}
 AppName=VPN Remote Desktop
-AppVersion=1.0.24
+AppVersion=1.0.25
 DefaultDirName={localappdata}\Programs\VpnRdpTray
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest

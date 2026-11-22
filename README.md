@@ -57,8 +57,8 @@ The right panel requests a scaled preview of a signed-in embedded desktop about 
 
 ### Embedded desktop controls
 
-- Maximize the window or press **Ctrl+Shift+F** for full screen. Press **Ctrl+Shift+F** again or choose **Exit full screen** to go back. Drag the exit control along the top edge to move it. The app remembers its position, and both shortcuts are available in its tooltip.
-- Press **Ctrl+Shift+N** to minimize the focused desktop in either mode. **Open Remote Desktop** restores the same session and view.
+- Maximize the window or press **Ctrl+Shift+F** for full screen. Press **Ctrl+Shift+F** again or click **Exit full screen (Ctrl+Shift+F)** to go back. Drag either button along the top edge to move the strip. The app remembers its position.
+- Press **Ctrl+Shift+N** to minimize the focused desktop in either mode, or click **Minimize (Ctrl+Shift+N)** in full screen. **Open Remote Desktop** restores the same session and view.
 - **Use all monitors in full screen** is on by default. The app requests the local display layout at connection time with multiple eligible monitors. Clear the setting for a single-display session. [Windows RDP display properties](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-properties#display-settings)
 
 The windowed desktop stays at least two-thirds as wide and two-thirds as tall as its monitor. The embedded desktop has a translucent glow outside the windowed frame and a narrow, click-through glow inside the full-screen edges. On the first Settings tab, **App and OpenVPN**, use **Internal glow (full screen)** and **External glow (windowed)** to control them independently. Both start on. Saving only a glow change updates the open embedded desktop without reconnecting.
@@ -135,7 +135,7 @@ For an Entra embedding test, choose **Embedded ActiveX prototype** with a dedica
 | Rejected credentials and certificates | Use a test account, a test certificate and a known lockout budget. Verify the retry delay, the pause at the limit, and immediate pause on certificate or classic sign-in rejection. |
 | Entra completion and cancellation | Complete MFA once and cancel it once. Check the embedded sign-in and disconnect events and the native handoff status. Use the tray action to return to the same prompt. |
 | Embedded resizing and closure | Resize the desktop and maximize it for full screen. Use **Ctrl+Shift+F** to go back. Close the signed-in desktop. Verify that VPN remains connected, the tray offers to reopen RDP, and VPN recovery leaves RDP closed. Reopen it and check that one window appears. |
-| Minimize and preview | Focus the embedded desktop in each view and press **Ctrl+Shift+N**. Check the preview when a frame is available. Use **Open Remote Desktop** and verify the same session returns to its previous view. |
+| Minimize and preview | Focus the embedded desktop in each view and press **Ctrl+Shift+N**. Also try the full-screen **Minimize** button. Use **Open Remote Desktop** and verify the same session returns to its previous view. |
 | Embedded glow | On the first Settings tab, turn off each glow independently while the desktop is open. Switch between full screen and windowed, then restart the app and verify both choices stayed saved. |
 | Windows keyboard shortcuts | With the signed-in desktop focused, try **Alt+Tab** and **Win+Tab** in windowed and full-screen views for each client. Switch focus to a local window and verify the shortcuts act locally again. |
 | Multiple monitors | With two displays connected, verify that the remote Windows display settings show both monitors. Clear the setting and verify the next session uses one. |

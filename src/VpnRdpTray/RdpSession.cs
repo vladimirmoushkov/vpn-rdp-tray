@@ -67,22 +67,14 @@ internal static class RdpDisplayTopology
 
 internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 {
-    private const int KeyDownMessage = 0x0100;
-    private const int KeyUpMessage = 0x0101;
-    private const long PreviousKeyState = 1L << 30;
     private const int DefaultExitRightOffsetDips = 24;
-    private const string ExitDockHint = "Ctrl+Shift+F exits full screen. Ctrl+Shift+N minimizes. Drag to move the button.";
+    private const string ExitDockHint = "Ctrl+Shift+F exits full screen. Ctrl+Shift+N minimizes. Drag either button to move the controls.";
     private readonly DesktopWindow window;
     private readonly RdpActiveX control;
     private readonly RdpWindowGlow windowGlow;
+    private readonly RdpWindowShortcuts shortcuts = new();
     private readonly Panel viewport = new() { Dock = DockStyle.Fill, BackColor = Color.Black };
-    private readonly FullScreenExitButton exitFullScreen = new()
-    {
-        AutoSize = true,
-        Text = "Exit full screen",
-        AccessibleDescription = ExitDockHint,
-        Visible = false
-    };
+    private readonly FullScreenControls fullScreenControls = new();
     private readonly ToolTip exitDockHelp = new();
     private readonly System.Windows.Forms.Timer displayUpdate = new() { Interval = 200 };
     private readonly System.Windows.Forms.Timer? activity;
@@ -96,7 +88,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private Rectangle? multiMonitorBounds;
     private FullScreenExitPlacement? exitDock = Settings.FullScreenExitDock, dragDock;
     private bool multiMonitorConfirmed, authenticationDialogOpen;
-    private bool signedIn, warningSeen, closing, fullScreen, fullScreenShortcutDown, minimizeShortcutDown;
+    private bool signedIn, warningSeen, closing, fullScreen;
     private bool internalGlow, externalGlow;
 
     internal HostedRdpSession(RdpEndpoint endpoint, RdpSettings settings, bool foreground, Action<string, bool> report)
@@ -127,15 +119,19 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 
         try
         {
-            exitFullScreen.Click += (_, _) => ToggleFullScreen();
-            exitFullScreen.DockDragged += DragExitButton;
-            exitFullScreen.DockDragEnded += CompleteExitDock;
-            exitDockHelp.SetToolTip(exitFullScreen, ExitDockHint);
+            fullScreenControls.Exit.Click += (_, _) => ToggleFullScreen();
+            fullScreenControls.Minimize.Click += (_, _) => MinimizeDesktop();
+            foreach (var button in new[] { fullScreenControls.Exit, fullScreenControls.Minimize })
+            {
+                button.DockDragged += DragFullScreenControls;
+                button.DockDragEnded += CompleteExitDock;
+                exitDockHelp.SetToolTip(button, ExitDockHint);
+            }
             ((ISupportInitialize)control).BeginInit();
             viewport.Controls.Add(control);
             window.Controls.Add(viewport);
-            window.Controls.Add(exitFullScreen);
-            exitFullScreen.BringToFront();
+            window.Controls.Add(fullScreenControls);
+            fullScreenControls.BringToFront();
             ((ISupportInitialize)control).EndInit();
             _ = window.Handle;
             SizeWindow(initialScreen);
@@ -166,7 +162,9 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             };
             window.Resize += (_, _) =>
             {
-                if (!fullScreen && window.WindowState == FormWindowState.Maximized)
+                if (window.WindowState == FormWindowState.Minimized)
+                    shortcuts.Disarm();
+                else if (!fullScreen && window.WindowState == FormWindowState.Maximized)
                     PostViewChange(EnterFullScreen);
                 else if (!fullScreen && window.WindowState == FormWindowState.Normal)
                     PostViewChange(UpdateWindowMinimum);
@@ -184,6 +182,12 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
                 QueueDisplayUpdate();
             };
             window.DisplayChanged += () => PostViewChange(UpdateWindowMinimum);
+            window.Activated += (_, _) => PostViewChange(RefreshShortcuts);
+            window.Deactivate += (_, _) => shortcuts.Disarm();
+            window.HandleCreated += (_, _) => PostViewChange(RefreshShortcuts);
+            window.HandleDestroyed += (_, _) => shortcuts.Disarm();
+            control.Enter += (_, _) => PostViewChange(RefreshShortcuts);
+            control.GotFocus += (_, _) => PostViewChange(RefreshShortcuts);
             window.KeyDown += (_, args) =>
             {
                 if (args.Modifiers != (Keys.Control | Keys.Alt) || args.KeyCode is not (Keys.Pause or Keys.Cancel))
@@ -193,8 +197,15 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
                 ToggleFullScreen();
             };
             displayUpdate.Tick += (_, _) => ApplyDisplayUpdate();
-            window.FullScreenHotkeyPressed += () => PostViewChange(ToggleFullScreen);
-            window.MinimizeHotkeyPressed += () => PostViewChange(MinimizeDesktop);
+            window.ShortcutPressed += key =>
+            {
+                if (!CanHandleShortcuts())
+                    return;
+                if (key == Keys.F)
+                    ToggleFullScreen();
+                else if (key == Keys.N)
+                    MinimizeDesktop();
+            };
             window.MaximizeRequested += () => PostViewChange(EnterFullScreen);
             control.FullScreenRequested += () => PostViewChange(ToggleFullScreen);
             control.RemoteDesktopSizeChanged += size => PostViewChange(() =>
@@ -222,6 +233,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
                     return;
                 signedIn = true;
                 report("RDP connected", false);
+                PostViewChange(RefreshShortcuts);
                 if (activity is not null && activitySchedule is null && control.SupportsPointerInput)
                 {
                     activitySchedule = new(Environment.TickCount64, HasForeground());
@@ -235,6 +247,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             control.AuthenticationWarning += () =>
             {
                 authenticationDialogOpen = true;
+                shortcuts.Disarm();
                 if (closing || signedIn)
                     return;
                 warningSeen = true;
@@ -243,6 +256,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             control.AuthenticationDismissed += () =>
             {
                 authenticationDialogOpen = false;
+                PostViewChange(RefreshShortcuts);
                 if (!closing && !signedIn && !completion.Task.IsCompleted)
                     report("RDP signing in", !savedPassword);
             };
@@ -275,7 +289,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 
             report("RDP opening connection", false);
             window.WindowState = foreground || !savedPassword && !entra ? FormWindowState.Normal : FormWindowState.Minimized;
-            Application.AddMessageFilter(this);
+            if (activityPointer is not null)
+                Application.AddMessageFilter(this);
             window.Show();
             RefreshWindowGlow();
             control.Connect();
@@ -303,6 +318,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     {
         if (completion.TrySetResult(failure))
         {
+            shortcuts.Disarm();
             activity?.Stop();
             windowGlow.Refresh(false);
         }
@@ -342,6 +358,17 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         return foreground == window.Handle || IsChild(window.Handle, foreground);
     }
 
+    private bool CanHandleShortcuts() => !closing && signedIn && !authenticationDialogOpen &&
+        !completion.Task.IsCompleted && window.WindowState != FormWindowState.Minimized && HasForeground() == true;
+
+    private void RefreshShortcuts()
+    {
+        if (CanHandleShortcuts())
+            shortcuts.Arm(window.Handle);
+        else
+            shortcuts.Disarm();
+    }
+
     bool IMessageFilter.PreFilterMessage(ref Message message)
     {
         if (closing)
@@ -351,43 +378,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             !authenticationDialogOpen && control.IsHandleCreated && (!multiMonitorBounds.HasValue || multiMonitorConfirmed))
             activityPointer?.Observe(control.Handle, control.ClientSize, remoteDisplay, message);
 
-        if ((message.Msg is not (KeyDownMessage or KeyUpMessage)) || !window.IsHandleCreated)
-            return false;
-
-        var key = (Keys)message.WParam;
-        if (key is not (Keys.F or Keys.N))
-            return false;
-        nint handle = window.Handle;
-        if (message.HWnd != handle && !IsChild(handle, message.HWnd))
-            return false;
-
-        return key switch
-        {
-            Keys.F when !window.IsFullScreenHotkeyRegistered =>
-                FilterLocalShortcut(ref message, ref fullScreenShortcutDown, ToggleFullScreen),
-            Keys.N when !window.IsMinimizeHotkeyRegistered =>
-                FilterLocalShortcut(ref message, ref minimizeShortcutDown, MinimizeDesktop),
-            _ => false
-        };
-    }
-
-    private bool FilterLocalShortcut(ref Message message, ref bool shortcutDown, Action action)
-    {
-        if (message.Msg == KeyUpMessage)
-        {
-            bool consumed = shortcutDown;
-            shortcutDown = false;
-            return consumed;
-        }
-
-        // The RDP control has native child windows that can consume the key before Form.KeyDown.
-        if ((message.LParam.ToInt64() & PreviousKeyState) == 0)
-        {
-            shortcutDown = Control.ModifierKeys == (Keys.Control | Keys.Shift);
-            if (shortcutDown)
-                PostViewChange(action);
-        }
-        return shortcutDown;
+        return false;
     }
 
     private void SizeWindow(Screen screen)
@@ -459,7 +450,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
                 window.Bounds = windowedBounds;
             }
 
-            exitFullScreen.Visible = fullScreen;
+            fullScreenControls.Visible = fullScreen;
         }
         finally { window.ResumeLayout(performLayout: true); }
         SetTaskbarFullScreen(fullScreen);
@@ -469,6 +460,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             RefreshWindowGlow();
         QueueDisplayUpdate();
         control.Focus();
+        PostViewChange(RefreshShortcuts);
     }
 
     private void MinimizeDesktop() => window.WindowState = FormWindowState.Minimized;
@@ -528,16 +520,16 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         control.Bounds = FitDisplay(viewport.ClientRectangle.Size, remoteDisplay);
         if (fullScreen)
         {
-            PositionExitButton();
+            PositionFullScreenControls();
             RefreshWindowGlow();
         }
     }
 
-    private void PositionExitButton()
+    private void PositionFullScreenControls()
     {
         var client = window.RectangleToScreen(window.ClientRectangle);
-        var buttonSize = exitFullScreen.GetPreferredSize(Size.Empty);
-        var displays = ExitDisplays(client, buttonSize);
+        var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
+        var displays = ExitDisplays(client, controlsSize);
         var placement = dragDock ?? exitDock;
         var chosen = displays.FirstOrDefault(display =>
             string.Equals(display.Screen.DeviceName, placement?.Monitor, StringComparison.OrdinalIgnoreCase));
@@ -548,7 +540,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             chosen = displays.FirstOrDefault(display => display.Screen.Bounds == fullScreenMonitor, displays.FirstOrDefault());
 
         if (chosen.Screen is not null)
-            exitFullScreen.Location = RdpDisplayTopology.ExitDockLocation(client, chosen.Area, buttonSize, offset, window.DeviceDpi);
+            fullScreenControls.Location = RdpDisplayTopology.ExitDockLocation(client, chosen.Area, controlsSize, offset, window.DeviceDpi);
     }
 
     private static (Screen Screen, Rectangle Area)[] ExitDisplays(Rectangle client, Size buttonSize) =>
@@ -557,20 +549,20 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
          where area.HasValue
          select (screen, area.GetValueOrDefault())).ToArray();
 
-    private void DragExitButton(Point pointer, int grabOffset)
+    private void DragFullScreenControls(Point pointer, int grabOffset)
     {
         if (!fullScreen || closing)
             return;
         var client = window.RectangleToScreen(window.ClientRectangle);
-        var buttonSize = exitFullScreen.GetPreferredSize(Size.Empty);
-        var chosen = ExitDisplays(client, buttonSize).FirstOrDefault(display => display.Area.Contains(pointer));
+        var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
+        var chosen = ExitDisplays(client, controlsSize).FirstOrDefault(display => display.Area.Contains(pointer));
         if (chosen.Screen is null)
             return;
 
-        int offset = Math.Clamp(chosen.Area.Right - pointer.X + grabOffset - buttonSize.Width,
-            0, chosen.Area.Width - buttonSize.Width);
+        int offset = Math.Clamp(chosen.Area.Right - pointer.X + grabOffset - controlsSize.Width,
+            0, chosen.Area.Width - controlsSize.Width);
         dragDock = new(chosen.Screen.DeviceName, (int)Math.Round(offset * (96d / window.DeviceDpi)));
-        PositionExitButton();
+        PositionFullScreenControls();
     }
 
     private void CompleteExitDock(bool commit)
@@ -582,7 +574,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         }
         dragDock = null;
         if (fullScreen && !closing)
-            PositionExitButton();
+            PositionFullScreenControls();
     }
 
     internal static Rectangle FitDisplay(Size viewportSize, Size desktopSize)
@@ -631,6 +623,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         window.Activate();
         if (signedIn && !authenticationDialogOpen && HasForeground() == true)
             control.Focus();
+        PostViewChange(RefreshShortcuts);
         RefreshWindowGlow();
     }
 
@@ -712,6 +705,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         if (closing)
             return;
         closing = true;
+        shortcuts.Dispose();
         windowGlow.Dispose();
         Application.RemoveMessageFilter(this);
         if (fullScreen)
@@ -728,20 +722,32 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsChild(nint parent, nint candidate);
 
-    private sealed class FullScreenExitButton : Button
+    private sealed class FullScreenControls : TableLayoutPanel
     {
-        private const int LeftButtonUpMessage = 0x0202;
-        private Rectangle dragThreshold;
-        private int grabOffset;
-        private bool pressed, dragging, releasing;
+        internal FullScreenDockButton Exit { get; } = new("Exit full screen (Ctrl+Shift+F)");
+        internal FullScreenDockButton Minimize { get; } = new("Minimize (Ctrl+Shift+N)");
 
-        internal event Action<Point, int>? DockDragged;
-        internal event Action<bool>? DockDragEnded;
-
-        internal FullScreenExitButton()
+        internal FullScreenControls()
         {
-            FlatStyle = FlatStyle.Flat;
-            UseVisualStyleBackColor = false;
+            Visible = false;
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            Padding = new Padding(1);
+            ColumnCount = 3;
+            RowCount = 1;
+            GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
+            AccessibleName = "Full-screen controls";
+            AccessibleRole = AccessibleRole.Grouping;
+            Controls.Add(Exit, 0, 0);
+            Controls.Add(new Label
+            {
+                Text = "|",
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
+                Margin = new Padding(2, 0, 2, 0),
+                AccessibleRole = AccessibleRole.Separator
+            }, 1, 0);
+            Controls.Add(Minimize, 2, 0);
             ApplyColors();
         }
 
@@ -751,12 +757,40 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             ApplyColors();
         }
 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            ControlPaint.DrawBorder(e.Graphics, ClientRectangle, ForeColor, ButtonBorderStyle.Solid);
+        }
+
         private void ApplyColors()
         {
             bool highContrast = SystemInformation.HighContrast;
             BackColor = highContrast ? SystemColors.Highlight : Color.FromArgb(0, 89, 184);
             ForeColor = highContrast ? SystemColors.HighlightText : Color.White;
-            FlatAppearance.BorderColor = ForeColor;
+        }
+    }
+
+    private sealed class FullScreenDockButton : Button
+    {
+        private const int LeftButtonUpMessage = 0x0202;
+        private Rectangle dragThreshold;
+        private int grabOffset;
+        private bool pressed, dragging, releasing;
+
+        internal event Action<Point, int>? DockDragged;
+        internal event Action<bool>? DockDragEnded;
+
+        internal FullScreenDockButton(string text)
+        {
+            Text = text;
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            Margin = Padding.Empty;
+            FlatStyle = FlatStyle.Flat;
+            FlatAppearance.BorderSize = 0;
+            UseVisualStyleBackColor = false;
+            AccessibleDescription = ExitDockHint;
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -769,7 +803,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             var movement = SystemInformation.DragSize;
             dragThreshold = new Rectangle(start.X - movement.Width / 2, start.Y - movement.Height / 2,
                 movement.Width, movement.Height);
-            grabOffset = e.X;
+            grabOffset = Left + e.X;
             pressed = true;
         }
 
@@ -835,75 +869,12 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private sealed class DesktopWindow : Form
     {
         private const int DisplayChangeMessage = 0x007E;
-        private const int HotkeyMessage = 0x0312;
         private const int SystemCommandMessage = 0x0112;
         private const int MaximizeCommand = 0xF030;
-        private const int FullScreenHotkeyId = 1;
-        private const int MinimizeHotkeyId = 2;
-        private const uint ControlShift = 0x0002 | 0x0004;
-        private const uint NoRepeat = 0x4000;
-        private nint fullScreenHotkeyWindow, minimizeHotkeyWindow;
 
-        internal event Action? FullScreenHotkeyPressed;
-        internal event Action? MinimizeHotkeyPressed;
+        internal event Action<Keys>? ShortcutPressed;
         internal event Action? MaximizeRequested;
         internal event Action? DisplayChanged;
-        internal bool IsFullScreenHotkeyRegistered => fullScreenHotkeyWindow != 0;
-        internal bool IsMinimizeHotkeyRegistered => minimizeHotkeyWindow != 0;
-
-        protected override void OnActivated(EventArgs e)
-        {
-            if (WindowState != FormWindowState.Minimized)
-                RegisterHotkeys();
-            base.OnActivated(e);
-        }
-
-        protected override void OnResize(EventArgs e)
-        {
-            if (WindowState == FormWindowState.Minimized)
-                ReleaseHotkeys();
-            else if (IsHandleCreated && GetForegroundWindow() == Handle)
-                RegisterHotkeys();
-            base.OnResize(e);
-        }
-
-        protected override void OnDeactivate(EventArgs e)
-        {
-            ReleaseHotkeys();
-            base.OnDeactivate(e);
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            ReleaseHotkeys();
-            base.OnHandleDestroyed(e);
-        }
-
-        private void RegisterHotkey(ref nint registeredWindow, int id, Keys key)
-        {
-            if (registeredWindow == 0 && RegisterHotKey(Handle, id, ControlShift | NoRepeat, (uint)key))
-                registeredWindow = Handle;
-        }
-
-        private void RegisterHotkeys()
-        {
-            RegisterHotkey(ref fullScreenHotkeyWindow, FullScreenHotkeyId, Keys.F);
-            RegisterHotkey(ref minimizeHotkeyWindow, MinimizeHotkeyId, Keys.N);
-        }
-
-        private void ReleaseHotkeys()
-        {
-            ReleaseHotkey(ref fullScreenHotkeyWindow, FullScreenHotkeyId);
-            ReleaseHotkey(ref minimizeHotkeyWindow, MinimizeHotkeyId);
-        }
-
-        private static void ReleaseHotkey(ref nint registeredWindow, int id)
-        {
-            if (registeredWindow == 0)
-                return;
-            UnregisterHotKey(registeredWindow, id);
-            registeredWindow = 0;
-        }
 
         protected override void WndProc(ref Message message)
         {
@@ -913,31 +884,16 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
                 return;
             }
 
-            if (message.Msg == HotkeyMessage && GetForegroundWindow() == Handle)
+            if (message.Msg == RdpWindowShortcuts.ShortcutMessage)
             {
-                if (message.WParam == FullScreenHotkeyId && IsFullScreenHotkeyRegistered)
-                {
-                    FullScreenHotkeyPressed?.Invoke();
-                    return;
-                }
-                if (message.WParam == MinimizeHotkeyId && IsMinimizeHotkeyRegistered)
-                {
-                    MinimizeHotkeyPressed?.Invoke();
-                    return;
-                }
+                ShortcutPressed?.Invoke((Keys)message.WParam);
+                return;
             }
             base.WndProc(ref message);
             if (message.Msg == DisplayChangeMessage)
                 DisplayChanged?.Invoke();
         }
 
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool RegisterHotKey(nint window, int id, uint modifiers, uint virtualKey);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UnregisterHotKey(nint window, int id);
     }
 
     [DllImport("user32.dll", ExactSpelling = true)]
