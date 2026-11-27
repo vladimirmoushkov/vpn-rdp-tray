@@ -22,6 +22,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem autoStartMenu = new();
     private readonly ToolStripMenuItem signInVpn = new("Sign in to VPN") { Visible = false };
     private readonly ToolStripMenuItem openRdp = new("Open Remote Desktop");
+    private readonly ToolStripMenuItem reconnectRdp = new("Reconnect Remote Desktop") { Visible = false };
     private readonly ToolStripMenuItem exit = new("Exit");
     private readonly ConnectionController controller;
     private readonly TrayWindow trayWindow;
@@ -49,7 +50,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         this.ui = ui;
         menu.Items.AddRange([summary, new ToolStripSeparator(), signInVpn, setupMenu, connectionMenu, autoStartMenu,
-            openRdp, new ToolStripSeparator(), exit]);
+            openRdp, reconnectRdp, new ToolStripSeparator(), exit]);
         icon = new NotifyIcon { ContextMenuStrip = menu, Icon = glyphs["off"], Visible = true };
         controller = new ConnectionController(new VpnSignInPrompt(), (vpn, rdp) =>
         {
@@ -78,6 +79,10 @@ internal sealed class TrayApp : ApplicationContext
                     rdp.Reason ?? ConnectionController.RdpReopenTip,
                     ToolTipIcon.Info);
             }
+        }, () =>
+        {
+            if (connection && !busy && !exiting)
+                ShowStatus();
         });
         SetupPreferences();
         AddLog("APP", "INFO", hasConfiguration ? "Loaded connection preferences." : "Settings required. Import a VPN profile to begin.");
@@ -86,6 +91,11 @@ internal sealed class TrayApp : ApplicationContext
         autoStartMenu.Click += (_, _) => SetAutoStart(!autoStart);
         signInVpn.Click += (_, _) => OpenVpnSignIn();
         openRdp.Click += (_, _) => OpenRemoteDesktop();
+        reconnectRdp.Click += (_, _) =>
+        {
+            if (connection && !busy && !exiting && !controller.ReconnectRemoteDesktop())
+                ShowStatus();
+        };
         exit.Click += async (_, _) => await ExitAsync();
         icon.MouseClick += (_, args) =>
         {
@@ -107,6 +117,10 @@ internal sealed class TrayApp : ApplicationContext
         {
             if (connection && hasConfiguration && !busy && !exiting)
                 controller.NotifySystemResumed();
+        }, () =>
+        {
+            if (connection && hasConfiguration && !busy && !exiting)
+                controller.NotifySystemSuspending();
         });
         if (!trayWindow.ReceivesWakeNotifications)
             AddLog("APP", "WARN", "Windows could not register wake notifications. Regular connection retries are still active.");
@@ -369,6 +383,7 @@ internal sealed class TrayApp : ApplicationContext
         exit.Enabled = !busy && !exiting;
         connectionMenu.Enabled = autoStartMenu.Enabled = !busy && !exiting;
         openRdp.Enabled = !busy && !exiting && rdp.Name != ConnectionController.RdpManualWaitingStatus;
+        reconnectRdp.Visible = connection && !busy && !exiting && controller.CanReconnectRemoteDesktop;
         signInVpn.Visible = CanSignInToVpn;
         string name = !hasConfiguration ? "Settings required" : !connection ? "Connection off" : vpn.Name;
         if (hasConfiguration && connection && vpn.Name == "VPN connected")
@@ -512,16 +527,18 @@ internal sealed class TrayApp : ApplicationContext
         private static readonly Guid SessionDisplayStatus = new("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
         private readonly Action showStatus;
         private readonly Action recheckOnWake;
+        private readonly Action? recordSuspending;
         private readonly nint suspendNotification, displayNotification;
         private readonly bool hotKeyRegistered;
         private bool resumeReported, displayOff, checkedWhileDisplayOff;
         private ulong? lastRecheck;
         internal bool ReceivesWakeNotifications => Handle != 0 && (suspendNotification != 0 || displayNotification != 0);
 
-        internal TrayWindow(Action showStatus, Action recheckOnWake)
+        internal TrayWindow(Action showStatus, Action recheckOnWake, Action? recordSuspending = null)
         {
             this.showStatus = showStatus;
             this.recheckOnWake = recheckOnWake;
+            this.recordSuspending = recordSuspending;
             try
             {
                 CreateHandle(new CreateParams { Parent = MessageOnlyWindow });
@@ -557,6 +574,7 @@ internal sealed class TrayApp : ApplicationContext
                 resumeReported = false;
                 checkedWhileDisplayOff = false;
                 lastRecheck = null;
+                recordSuspending?.Invoke();
                 return true;
             }
             if (kind is PowerResumeAutomatic or PowerResumeSuspend or PowerResumeCritical)

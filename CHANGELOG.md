@@ -4,6 +4,7 @@ The [Releases page](../../releases) contains the current release, the recovered 
 
 | Version | Changes |
 | --- | --- |
+| **1.0.29** | Shows a recovery panel over the embedded desktop after wake, with connection progress, the probe result, and controls to view the old session, reconnect, or open status. If the visible desktop closes during recovery, progress continues in the status window. |
 | **1.0.28** | Added a saved manual-only RDP mode for shared remote PCs. The VPN connects normally, and each desktop connection requires an explicit open. The embedded client also pauses automatic RDP when Windows reports that the session was ended or replaced. |
 | **1.0.27** | Stacked the full-screen buttons in a narrower strip when docked to either side. The controls turn back into a horizontal strip at the top. |
 | **1.0.26** | Made the full-screen controls dock to the left and right edges as well as the top. The app remembers the edge and position. |

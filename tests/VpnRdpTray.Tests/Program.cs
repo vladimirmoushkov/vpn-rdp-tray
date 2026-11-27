@@ -29,6 +29,7 @@ internal static class Program
         TestProtocolClassification();
         TestTransportAsync().GetAwaiter().GetResult();
         TestRdpProbeResults();
+        TestRdpWakeResult();
         TestRdpSettings();
         TestFullScreenDocking();
         TestRdpActivitySchedule();
@@ -575,8 +576,8 @@ internal static class Program
     private static void TestWakeNotifications()
     {
         const int suspend = 4, interactiveResume = 7, automaticResume = 0x12, powerSettingChange = 0x8013;
-        int checks = 0;
-        using var window = new TrayApp.TrayWindow(() => { }, () => checks++);
+        int checks = 0, suspends = 0;
+        using var window = new TrayApp.TrayWindow(() => { }, () => checks++, () => suspends++);
         Require(window.ReceivesWakeNotifications, "Windows registered wake notifications for the tray window");
 
         // POWERBROADCAST_SETTING consists of a GUID, payload length and the display state DWORD.
@@ -590,14 +591,14 @@ internal static class Program
             Display(0);
             Display(1);
             Display(1);
-            Require(checks == 1, "Display off then on triggers one Modern Standby recheck");
+            Require(checks == 1 && suspends == 0, "Display off then on triggers one Modern Standby recheck without a suspend");
 
             Display(0);
             SendMessageW(window.Handle, 0x0218, suspend, 0);
             SendMessageW(window.Handle, 0x0218, automaticResume, 0);
             SendMessageW(window.Handle, 0x0218, interactiveResume, 0);
             Display(1);
-            Require(checks == 2, "Automatic resume, interactive resume and display-on share one recheck");
+            Require(checks == 2 && suspends == 1, "Record the sleep event and deduplicate its three wake notifications");
 
             void Display(int state)
             {
@@ -607,6 +608,23 @@ internal static class Program
         }
         finally { Marshal.FreeHGlobal(data); }
         Console.WriteLine("Tray wake registration, Modern Standby notification and duplicate suppression passed.");
+    }
+
+    private static void TestRdpWakeResult()
+    {
+        var reached = ConnectionController.DescribeWakeResult(null, transportConnected: true);
+        var unknown = ConnectionController.DescribeWakeResult(null, transportConnected: null);
+        var disconnected = ConnectionController.DescribeWakeResult(null, transportConnected: false);
+        Require(reached.Title == ConnectionController.RdpAfterResumeChecked && reached.CanView &&
+            unknown == reached && reached.Detail.Contains("port answered", StringComparison.Ordinal),
+            "A reachable port leaves the view and reconnect controls available without claiming a fresh desktop");
+        Require(disconnected.Title == ConnectionController.RdpWakeDisconnected && !disconnected.CanView,
+            "A disconnected ActiveX client still needs an explicit reconnect");
+        var failure = new Failure("The RDP TCP port refused the connection.");
+        var refused = ConnectionController.DescribeWakeResult(failure, transportConnected: true);
+        Require(refused.Title == ConnectionController.RdpWakeProbeFailed && refused.Detail == failure.Reason && refused.CanView,
+            "A refused new socket reports its reason while allowing review of the existing session");
+        Console.WriteLine("RDP wake results distinguish reachability, an old session, and probe errors.");
     }
 
     [DllImport("user32.dll", ExactSpelling = true)]

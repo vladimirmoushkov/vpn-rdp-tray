@@ -199,6 +199,16 @@ internal sealed class RdpActiveX() : AxHost("1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B
 
     internal void Connect() => Client.Connect();
 
+    internal bool? IsTransportConnected
+    {
+        get
+        {
+            try { return (short)Client.Connected == 1; }
+            catch (Exception ex) when (ex is COMException or RuntimeBinderException or InvalidOperationException or InvalidCastException)
+            { return null; }
+        }
+    }
+
     internal int ReadExtendedDisconnectReason()
     {
         try { return (int)Client.ExtendedDisconnectReason; }

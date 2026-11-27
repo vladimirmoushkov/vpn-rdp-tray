@@ -134,6 +134,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private readonly RdpWindowGlow windowGlow;
     private readonly RdpWindowShortcuts shortcuts = new();
     private readonly Panel viewport = new() { Dock = DockStyle.Fill, BackColor = Color.Black };
+    private readonly RdpRecoveryPanel recovery = new();
     private readonly FullScreenControls fullScreenControls = new();
     private readonly ToolTip exitDockHelp = new();
     private readonly System.Windows.Forms.Timer displayUpdate = new() { Interval = 200 };
@@ -148,7 +149,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private Rectangle? multiMonitorBounds;
     private FullScreenExitPlacement? exitDock = Settings.FullScreenExitDock, dragDock;
     private bool multiMonitorConfirmed, authenticationDialogOpen;
-    private bool signedIn, warningSeen, closing, fullScreen;
+    private bool signedIn, warningSeen, closing, fullScreen, recoveryOpen;
     private bool internalGlow, externalGlow;
 
     internal HostedRdpSession(RdpEndpoint endpoint, RdpSettings settings, bool foreground, Action<string, bool> report)
@@ -189,6 +190,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             }
             ((ISupportInitialize)control).BeginInit();
             viewport.Controls.Add(control);
+            viewport.Controls.Add(recovery);
+            recovery.BringToFront();
             window.Controls.Add(viewport);
             window.Controls.Add(fullScreenControls);
             fullScreenControls.BringToFront();
@@ -247,7 +250,12 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             window.HandleCreated += (_, _) => PostViewChange(RefreshShortcuts);
             window.HandleDestroyed += (_, _) => shortcuts.Disarm();
             control.Enter += (_, _) => PostViewChange(RefreshShortcuts);
-            control.GotFocus += (_, _) => PostViewChange(RefreshShortcuts);
+            control.GotFocus += (_, _) => PostViewChange(() =>
+            {
+                if (recoveryOpen && !authenticationDialogOpen && HasForeground() == true)
+                    recovery.FocusPrimary();
+                RefreshShortcuts();
+            });
             window.KeyDown += (_, args) =>
             {
                 if (args.Modifiers != (Keys.Control | Keys.Alt) || args.KeyCode is not (Keys.Pause or Keys.Cancel))
@@ -367,9 +375,56 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 
     internal bool IsPreviewMinimized => window.WindowState == FormWindowState.Minimized;
 
+    internal bool CanShowRecovery => signedIn && !authenticationDialogOpen && !closing && !completion.Task.IsCompleted;
+
+    internal bool RecoveryVisible => recoveryOpen;
+
+    internal bool RecoveryWindowVisible => !closing && window.Visible && !IsPreviewMinimized;
+
+    internal bool? TransportConnected =>
+        !closing && !completion.Task.IsCompleted ? control.IsTransportConnected : false;
+
+    internal void SetRecovery(string title, string detail, Action? reconnect, Action openStatus,
+        Action? viewDesktop = null)
+    {
+        if (!CanShowRecovery)
+            return;
+
+        bool alreadyOpen = recoveryOpen;
+        recoveryOpen = true;
+        recovery.UpdateContent(title, detail, reconnect, openStatus, viewDesktop is null ? null : () =>
+        {
+            ClearRecovery();
+            viewDesktop();
+        });
+        UpdateRecoveryArea();
+        recovery.Show();
+        recovery.PerformLayout();
+        recovery.BringToFront();
+        if (!alreadyOpen)
+        {
+            activityPointer?.Reset();
+            if (RecoveryWindowVisible && !authenticationDialogOpen && HasForeground() == true)
+                recovery.FocusPrimary();
+        }
+    }
+
+    internal void ClearRecovery()
+    {
+        if (!recoveryOpen || closing)
+            return;
+
+        bool hadFocus = recovery.ContainsFocus;
+        recoveryOpen = false;
+        recovery.ResetActions();
+        recovery.Hide();
+        if (hadFocus && !completion.Task.IsCompleted && !authenticationDialogOpen && HasForeground() == true)
+            control.Focus();
+    }
+
     internal Bitmap? CapturePreview(Size maximumSize)
     {
-        if (!signedIn || closing || authenticationDialogOpen || completion.Task.IsCompleted || !control.IsHandleCreated)
+        if (!signedIn || closing || recoveryOpen || authenticationDialogOpen || completion.Task.IsCompleted || !control.IsHandleCreated)
             return null;
 
         return RdpPreview.Capture(control.Handle, control.ClientSize, maximumSize);
@@ -387,7 +442,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 
     private void SendActivity(object? sender, EventArgs args)
     {
-        if (activitySchedule is not { } schedule || activityPointer is not { } pointer || closing || !signedIn ||
+        if (activitySchedule is not { } schedule || activityPointer is not { } pointer || closing || recoveryOpen || !signedIn ||
             authenticationDialogOpen || completion.Task.IsCompleted || !control.IsHandleCreated)
             return;
 
@@ -435,7 +490,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         if (closing)
             return false;
 
-        if (message.Msg == RdpPointerActivity.MouseMove && activitySchedule is not null && signedIn &&
+        if (message.Msg == RdpPointerActivity.MouseMove && activitySchedule is not null && signedIn && !recoveryOpen &&
             !authenticationDialogOpen && control.IsHandleCreated && (!multiMonitorBounds.HasValue || multiMonitorConfirmed))
             activityPointer?.Observe(control.Handle, control.ClientSize, remoteDisplay, message);
 
@@ -520,7 +575,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         if (!fullScreen)
             RefreshWindowGlow();
         QueueDisplayUpdate();
-        control.Focus();
+        FocusDesktopSurface();
         PostViewChange(RefreshShortcuts);
     }
 
@@ -579,11 +634,26 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         if (closing)
             return;
         control.Bounds = FitDisplay(viewport.ClientRectangle.Size, remoteDisplay);
+        if (recoveryOpen)
+            UpdateRecoveryArea();
         if (fullScreen)
         {
             PositionFullScreenControls();
             RefreshWindowGlow();
         }
+    }
+
+    private void UpdateRecoveryArea()
+    {
+        var area = viewport.ClientRectangle;
+        if (fullScreen)
+        {
+            var host = viewport.RectangleToScreen(area);
+            var monitor = Rectangle.Intersect(host, fullScreenMonitor);
+            if (monitor.Width > 0 && monitor.Height > 0)
+                area = viewport.RectangleToClient(monitor);
+        }
+        recovery.SetContentArea(area);
     }
 
     private void PositionFullScreenControls()
@@ -702,10 +772,20 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             }
         }
         window.Activate();
-        if (signedIn && !authenticationDialogOpen && HasForeground() == true)
-            control.Focus();
+        if (signedIn && HasForeground() == true)
+            FocusDesktopSurface();
         PostViewChange(RefreshShortcuts);
         RefreshWindowGlow();
+    }
+
+    private void FocusDesktopSurface()
+    {
+        if (authenticationDialogOpen)
+            return;
+        if (recoveryOpen)
+            recovery.FocusPrimary();
+        else
+            control.Focus();
     }
 
     internal void SetGlow(bool showInternal, bool showExternal)
@@ -1055,6 +1135,171 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         void SetActiveAlt(nint handle);
         void MarkFullscreenWindow(nint handle, [MarshalAs(UnmanagedType.Bool)] bool fullScreen);
     }
+}
+
+internal sealed class RdpRecoveryPanel : Panel
+{
+    private readonly TableLayoutPanel card = new()
+    {
+        ColumnCount = 1,
+        RowCount = 3,
+        Margin = Padding.Empty,
+        GrowStyle = TableLayoutPanelGrowStyle.FixedSize
+    };
+    private readonly Label heading = new() { AutoSize = true, UseMnemonic = false };
+    private readonly Label explanation = new() { AutoSize = true, UseMnemonic = false };
+    private readonly FlowLayoutPanel actions = new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        WrapContents = true
+    };
+    private readonly Button view = CreateButton("View desktop");
+    private readonly Button reconnect = CreateButton("Reconnect now");
+    private readonly Button status = CreateButton("Connection status");
+    private readonly Font headingFont = new(DefaultFont.FontFamily, 17f, FontStyle.Bold);
+    private Action? viewAction, reconnectAction, statusAction;
+    private Rectangle contentArea;
+    private bool layingOut;
+
+    internal RdpRecoveryPanel()
+    {
+        Dock = DockStyle.Fill;
+        Visible = false;
+        AccessibleName = "Remote Desktop connection recovery";
+        AccessibleRole = AccessibleRole.Grouping;
+        heading.Font = headingFont;
+        card.Controls.Add(heading, 0, 0);
+        card.Controls.Add(explanation, 0, 1);
+        card.Controls.Add(actions, 0, 2);
+        actions.Controls.Add(view);
+        actions.Controls.Add(reconnect);
+        actions.Controls.Add(status);
+        Controls.Add(card);
+        view.Click += (_, _) => viewAction?.Invoke();
+        reconnect.Click += (_, _) => reconnectAction?.Invoke();
+        status.Click += (_, _) => statusAction?.Invoke();
+        ApplyColors();
+    }
+
+    internal void UpdateContent(string title, string detail, Action? retry, Action showStatus, Action? showDesktop)
+    {
+        viewAction = showDesktop;
+        reconnectAction = retry;
+        statusAction = showStatus;
+        heading.Text = title;
+        explanation.Text = detail;
+        view.Visible = showDesktop is not null;
+        reconnect.Visible = retry is not null;
+        ApplyButtonColors();
+        PerformLayout();
+    }
+
+    internal void ResetActions() => viewAction = reconnectAction = statusAction = null;
+
+    internal void FocusPrimary()
+    {
+        if (view.Visible)
+            view.Focus();
+        else if (reconnect.Visible)
+            reconnect.Focus();
+        else
+            status.Focus();
+    }
+
+    internal void SetContentArea(Rectangle area)
+    {
+        if (contentArea == area)
+            return;
+        contentArea = area;
+        PerformLayout();
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        if (layingOut || card.Parent != this)
+            return;
+
+        layingOut = true;
+        try
+        {
+            var area = Rectangle.Intersect(contentArea, ClientRectangle);
+            if (area.Width == 0 || area.Height == 0)
+                area = ClientRectangle;
+            int margin = Scale(16);
+            int width = Math.Clamp(area.Width - 2 * margin, 1, Scale(490));
+            int padding = Math.Min(Scale(20), width / 6);
+            int textWidth = width - 2 * padding;
+            card.SuspendLayout();
+            try
+            {
+                card.Padding = new Padding(padding);
+                heading.Margin = new Padding(0, 0, 0, Scale(8));
+                explanation.Margin = new Padding(0, 0, 0, Scale(16));
+                actions.Margin = Padding.Empty;
+                heading.MaximumSize = explanation.MaximumSize = actions.MaximumSize = new Size(textWidth, 0);
+                foreach (var button in new[] { view, reconnect, status })
+                {
+                    button.Padding = new Padding(Scale(9), Scale(4), Scale(9), Scale(4));
+                    button.Margin = new Padding(0, 0, Scale(6), Scale(4));
+                }
+                int height = card.GetPreferredSize(new Size(width, 0)).Height;
+                card.SetBounds(area.Left + (area.Width - width) / 2,
+                    area.Top + Math.Max(0, (area.Height - height) / 2), width, height);
+            }
+            finally { card.ResumeLayout(performLayout: true); }
+        }
+        finally { layingOut = false; }
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs e)
+    {
+        base.OnSystemColorsChanged(e);
+        ApplyColors();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing)
+            headingFont.Dispose();
+    }
+
+    private int Scale(int value) => (int)Math.Round(value * DeviceDpi / 96d);
+
+    private void ApplyColors()
+    {
+        bool highContrast = SystemInformation.HighContrast;
+        BackColor = highContrast ? SystemColors.Window : Color.FromArgb(15, 23, 33);
+        card.BackColor = highContrast ? SystemColors.Window : Color.FromArgb(26, 39, 55);
+        heading.ForeColor = highContrast ? SystemColors.WindowText : Color.White;
+        explanation.ForeColor = highContrast ? SystemColors.WindowText : Color.FromArgb(214, 224, 236);
+        ApplyButtonColors();
+    }
+
+    private void ApplyButtonColors()
+    {
+        bool highContrast = SystemInformation.HighContrast;
+        var primary = viewAction is not null ? view : reconnectAction is not null ? reconnect : status;
+        foreach (var button in new[] { view, reconnect, status })
+        {
+            button.BackColor = highContrast ? SystemColors.ButtonFace :
+                button == primary ? Color.FromArgb(0, 89, 184) : card.BackColor;
+            button.ForeColor = highContrast ? SystemColors.ControlText : Color.White;
+            button.FlatAppearance.BorderColor = highContrast ? SystemColors.ControlText :
+                button == primary ? Color.FromArgb(71, 148, 228) : Color.FromArgb(113, 135, 161);
+        }
+    }
+
+    private static Button CreateButton(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        FlatStyle = FlatStyle.Flat,
+        UseVisualStyleBackColor = false
+    };
 }
 
 internal sealed class NativeRdpSession : IRdpSession

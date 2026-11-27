@@ -6,14 +6,20 @@ namespace VpnRdpTray;
 internal sealed record ConnectionStatus(string Name, string? Reason = null, DateTimeOffset? RetryAt = null,
     bool Action = false, bool SignIn = false, string? LastFailure = null);
 
-internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<ConnectionStatus, ConnectionStatus> display)
+internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<ConnectionStatus, ConnectionStatus> display,
+    Action? showConnectionStatus = null)
 {
     internal const string RdpClosedStatus = "RDP window closed";
     internal const string RdpReopenTip = "Choose Open Remote Desktop in the tray or click RDP in the status window.";
     internal const string RdpOffStatus = "RDP off";
     internal const string RdpReadyStatus = "RDP ready";
     internal const string RdpManualWaitingStatus = "RDP needs VPN";
+    internal const string RdpAfterResumeChecked = "RDP wake check complete";
+    internal const string RdpWakeProbeFailed = "RDP port check failed";
+    internal const string RdpWakeDisconnected = "RDP session disconnected";
     internal const string VpnSignInStatus = "VPN sign-in required";
+    private const string RdpCheckingAfterResume = "RDP checking after wake";
+    private const string CheckAfterResumeDetail = "Waiting for the laptop network to settle, then checking the Remote Desktop port through the VPN.";
     private const string VpnCheckingAfterResume = "VPN checking after wake";
     private const string VpnRefreshingAfterResume = "VPN reconnecting after wake";
     private const long ResumeSettleMilliseconds = 5_000;
@@ -23,12 +29,13 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
     private CancellationTokenSource? vpnAttemptStop;
     private Task? work;
     private IRdpSession? rdpSession;
+    private IRdpSession? wakeDesktop;
     private CancellationTokenSource? rdpAttemptStop;
     private TaskCompletionSource? rdpEnabledChanged, rdpWake, vpnWake;
     private Tunnel? activeTunnel;
     private Tunnel? manualRdpRequest;
     private ResumeCheck? resumeCheck;
-    private bool foreground, revealNextVpnPrompt, rdpRetryScheduled, rdpDismissed, manualRdp;
+    private bool foreground, revealNextVpnPrompt, rdpRetryScheduled, rdpDismissed, manualRdp, desktopVisibleBeforeSleep;
     private (bool Internal, bool External) rdpGlow;
     private ConnectionStatus vpn = new("VPN idle");
     private ConnectionStatus rdp = new("RDP waiting for VPN");
@@ -36,6 +43,9 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
     private sealed record ResumeCheck(Tunnel Tunnel, long StartedAt);
 
     internal bool RdpEnabled { get; private set; } = true;
+    internal bool CanReconnectRemoteDesktop => RdpEnabled && rdpSession is { Completion.IsCompleted: false } &&
+        rdpAttemptStop is { IsCancellationRequested: false } && activeTunnel is not null &&
+        vpnAttemptStop is { IsCancellationRequested: false };
 
     internal void Start(Configuration configuration)
     {
@@ -69,6 +79,8 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                 work = null;
                 foreground = false;
                 revealNextVpnPrompt = false;
+                desktopVisibleBeforeSleep = false;
+                wakeDesktop = null;
             }
         }
     }
@@ -139,14 +151,96 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             hosted.SetGlow(internalGlow, externalGlow);
     }
 
+    internal void NotifySystemSuspending() =>
+        desktopVisibleBeforeSleep = rdpSession is HostedRdpSession { CanShowRecovery: true, RecoveryWindowVisible: true };
+
     internal void NotifySystemResumed()
     {
+        bool wasVisible = desktopVisibleBeforeSleep;
+        desktopVisibleBeforeSleep = false;
         // Only verify a tunnel that was already established at wake. A new connection checks its route normally.
-        if (activeTunnel is not { } tunnel || vpnAttemptStop is not { IsCancellationRequested: false })
+        if (activeTunnel is { } tunnel && vpnAttemptStop is { IsCancellationRequested: false })
+        {
+            resumeCheck = new(tunnel, Environment.TickCount64);
+            if (CanReconnectRemoteDesktop && rdpSession is HostedRdpSession { CanShowRecovery: true } or NativeRdpSession)
+            {
+                wakeDesktop = rdpSession;
+                ReportWakeProbeProgress(CheckAfterResumeDetail);
+                return;
+            }
+            if (rdpRetryScheduled)
+                rdpWake?.TrySetResult();
+        }
+        if (wasVisible)
+            showConnectionStatus?.Invoke();
+    }
+
+    internal bool ReconnectRemoteDesktop() => ReconnectRemoteDesktop(rdpSession);
+
+    private bool ReconnectRemoteDesktop(IRdpSession? expectedSession)
+    {
+        if (!ReferenceEquals(rdpSession, expectedSession) || !CanReconnectRemoteDesktop)
+            return false;
+
+        if (manualRdp)
+            manualRdpRequest = activeTunnel;
+        foreground = true;
+        wakeDesktop = null;
+        Rdp(new("RDP reconnect requested", "Closing the old window before checking the connection again."));
+        rdpAttemptStop!.Cancel();
+        showConnectionStatus?.Invoke();
+        return true;
+    }
+
+    private void ShowWakeCard(HostedRdpSession hosted, string title, string detail, bool canView = false, bool canReconnect = true)
+    {
+        hosted.SetRecovery(title, detail,
+            canReconnect ? () => { if (!ReconnectRemoteDesktop(hosted)) showConnectionStatus?.Invoke(); } : null,
+            () => showConnectionStatus?.Invoke(),
+            canView ? () =>
+            {
+                if (!ReferenceEquals(rdpSession, hosted))
+                    return;
+                wakeDesktop = null;
+                Rdp(hosted.TransportConnected == true ? new("RDP connected") :
+                    new(RdpAfterResumeChecked, "The previous window is open. Use Reconnect Remote Desktop from the tray if the display is still unavailable."));
+            } : null);
+    }
+
+    private void ReportWakeProbeProgress(string detail)
+    {
+        if (wakeDesktop is not { Completion.IsCompleted: false } desktop || !ReferenceEquals(desktop, rdpSession))
             return;
-        resumeCheck = new(tunnel, Environment.TickCount64);
-        if (rdpRetryScheduled)
-            rdpWake?.TrySetResult();
+        Rdp(new(RdpCheckingAfterResume, detail));
+        if (desktop is HostedRdpSession hosted)
+            ShowWakeCard(hosted, RdpCheckingAfterResume, detail);
+    }
+
+    private void ReportWakeResult(Failure? failure)
+    {
+        if (wakeDesktop is not { Completion.IsCompleted: false } desktop || !ReferenceEquals(desktop, rdpSession))
+            return;
+
+        if (desktop is HostedRdpSession hosted)
+        {
+            var (title, detail, canView) = DescribeWakeResult(failure, hosted.TransportConnected);
+            Rdp(new(title, detail, LastFailure: failure?.Reason));
+            ShowWakeCard(hosted, title, detail, canView);
+        }
+        else
+        {
+            string detail = failure?.Reason ?? "The Remote Desktop port answered. Windows Remote Desktop shows whether the old session is still available.";
+            Rdp(new(failure is null ? "Opened in Remote Desktop" : RdpWakeProbeFailed, detail, LastFailure: failure?.Reason));
+        }
+    }
+
+    internal static (string Title, string Detail, bool CanView) DescribeWakeResult(Failure? failure, bool? transportConnected)
+    {
+        if (failure is not null)
+            return (RdpWakeProbeFailed, failure.Reason, transportConnected != false);
+        return transportConnected == false
+            ? (RdpWakeDisconnected, "The remote PC answered through the VPN. Choose Reconnect now to open a new session.", false)
+            : (RdpAfterResumeChecked, "The Remote Desktop port answered through the VPN. View the existing session, or reconnect if its display still looks stuck.", true);
     }
 
     private void SetRemoteDesktopEnabled(bool enabled)
@@ -564,7 +658,15 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                     (message, action) =>
                     {
                         if (!token.IsCancellationRequested)
+                        {
+                            if (message == "RDP connected" && wakeDesktop is HostedRdpSession current &&
+                                ReferenceEquals(rdpSession, current))
+                            {
+                                current.ClearRecovery();
+                                wakeDesktop = null;
+                            }
                             Rdp(new(message, Action: action, LastFailure: message == "RDP connected" ? null : lastFailure));
+                        }
                     });
             }
             catch (Exception ex) when (HostedRdpSession.IsClientException(ex))
@@ -607,8 +709,14 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         }
         finally
         {
+            bool showRecoveryStatus = rdpSession is HostedRdpSession { RecoveryVisible: true, RecoveryWindowVisible: true } hosted &&
+                ReferenceEquals(hosted, wakeDesktop) && lifetime is { IsCancellationRequested: false };
+            if (ReferenceEquals(wakeDesktop, rdpSession))
+                wakeDesktop = null;
             rdpSession?.Dispose();
             rdpSession = null;
+            if (showRecoveryStatus)
+                showConnectionStatus?.Invoke();
         }
     }
 
@@ -619,11 +727,15 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             await Task.Delay(TimeSpan.FromSeconds(3), token);
             if (await WaitForResumeCheckAsync(tunnel, token) is { } afterResume)
             {
+                ReportWakeProbeProgress("Testing the Remote Desktop port over the VPN. You can reconnect or open Connection status while this check runs.");
                 var (failure, canRefresh) = await RdpRoute.CheckEndpointAsync(endpoint, tunnel, token);
                 token.ThrowIfCancellationRequested();
+                if (CurrentResumeCheck(tunnel) is { } next && !ReferenceEquals(afterResume, next))
+                    continue;
                 if (failure is not null && canRefresh && TryRefreshVpn(afterResume, failure, token))
                     return failure;
                 CompleteResumeCheck(afterResume);
+                ReportWakeResult(failure);
                 if (CurrentResumeCheck(tunnel) is not null)
                     continue;
             }
@@ -673,6 +785,9 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             return false;
 
         resumeCheck = null;
+        if (wakeDesktop is HostedRdpSession hosted && ReferenceEquals(hosted, rdpSession))
+            ShowWakeCard(hosted, "VPN reconnecting after wake",
+                $"The Remote Desktop port did not answer through the old tunnel. {failure.Reason}", canReconnect: false);
         Vpn(new(VpnRefreshingAfterResume, $"Remote Desktop did not respond through the VPN after wake. {failure.Reason}"));
         if (manualRdp)
             RdpWaitingForVpn();
