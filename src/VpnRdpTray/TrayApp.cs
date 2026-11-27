@@ -75,7 +75,7 @@ internal sealed class TrayApp : ApplicationContext
             else if (closed && vpn.Name == "VPN connected")
             {
                 icon.ShowBalloonTip(4500, "Remote Desktop closed",
-                    ConnectionController.RdpReopenTip,
+                    rdp.Reason ?? ConnectionController.RdpReopenTip,
                     ToolTipIcon.Info);
             }
         });
@@ -367,7 +367,8 @@ internal sealed class TrayApp : ApplicationContext
         autoStartMenu.Checked = autoStart;
         setupMenu.Enabled = !exiting;
         exit.Enabled = !busy && !exiting;
-        connectionMenu.Enabled = autoStartMenu.Enabled = openRdp.Enabled = !busy && !exiting;
+        connectionMenu.Enabled = autoStartMenu.Enabled = !busy && !exiting;
+        openRdp.Enabled = !busy && !exiting && rdp.Name != ConnectionController.RdpManualWaitingStatus;
         signInVpn.Visible = CanSignInToVpn;
         string name = !hasConfiguration ? "Settings required" : !connection ? "Connection off" : vpn.Name;
         if (hasConfiguration && connection && vpn.Name == "VPN connected")

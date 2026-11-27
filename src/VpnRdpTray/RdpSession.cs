@@ -15,6 +15,8 @@ internal interface IRdpSession : IDisposable
 
 internal static class RdpDisplayTopology
 {
+    private const int EdgeSnapDips = 32;
+
     internal static Rectangle? ConnectedMultiMonitorBounds(bool enabled) => enabled
         ? MultiMonitorBounds(Screen.AllScreens.Select(screen => screen.Bounds))
         : null;
@@ -48,27 +50,85 @@ internal static class RdpDisplayTopology
         return bounds;
     }
 
-    internal static Rectangle? ExitDockArea(Rectangle clientScreenBounds, Rectangle monitorBounds, Size buttonSize)
+    internal static Rectangle? ExitDockArea(Rectangle clientScreenBounds, Rectangle monitorBounds, Size stripSize,
+        RdpDockEdge edge = RdpDockEdge.Top)
     {
         var visible = Rectangle.Intersect(clientScreenBounds, monitorBounds);
-        return visible.Top == monitorBounds.Top && visible.Width >= buttonSize.Width && visible.Height >= buttonSize.Height
-            ? visible
-            : null;
+        bool edgeVisible = edge switch
+        {
+            RdpDockEdge.Top => visible.Top == monitorBounds.Top,
+            RdpDockEdge.Left => visible.Left == monitorBounds.Left,
+            RdpDockEdge.Right => visible.Right == monitorBounds.Right,
+            _ => false
+        };
+        return edgeVisible && visible.Width >= stripSize.Width && visible.Height >= stripSize.Height ? visible : null;
     }
 
-    internal static Point ExitDockLocation(Rectangle clientScreenBounds, Rectangle dockArea, Size buttonSize,
-        int rightOffsetDips, int dpi)
+    internal static RdpDockEdge? ExitDockEdge(Rectangle client, Rectangle monitor, Size stripSize, Point pointer,
+        RdpDockEdge currentEdge, int dpi)
     {
-        int rightOffset = (int)Math.Clamp(Math.Round(rightOffsetDips * (dpi / 96d)), 0, dockArea.Width - buttonSize.Width);
-        return new Point(dockArea.Right - buttonSize.Width - rightOffset - clientScreenBounds.Left,
-            dockArea.Top - clientScreenBounds.Top);
+        if (!monitor.Contains(pointer) || !client.Contains(pointer))
+            return null;
+
+        RdpDockEdge? nearest = null, fallback = null;
+        int snapDistance = (int)Math.Round(EdgeSnapDips * (dpi / 96d));
+        int nearestDistance = snapDistance;
+        ReadOnlySpan<RdpDockEdge> edges = [RdpDockEdge.Top, RdpDockEdge.Left, RdpDockEdge.Right];
+        foreach (var edge in edges)
+        {
+            if (!ExitDockArea(client, monitor, stripSize, edge).HasValue)
+                continue;
+            if (fallback is null || edge == currentEdge)
+                fallback = edge;
+            int distance = edge switch
+            {
+                RdpDockEdge.Top => pointer.Y - monitor.Top,
+                RdpDockEdge.Left => pointer.X - monitor.Left,
+                _ => monitor.Right - 1 - pointer.X
+            };
+            if (distance <= snapDistance && (nearest is null || distance < nearestDistance ||
+                distance == nearestDistance && edge == currentEdge))
+            {
+                nearest = edge;
+                nearestDistance = distance;
+            }
+        }
+        return nearest ?? fallback;
     }
+
+    internal static Point ExitDockLocation(Rectangle client, Rectangle dockArea, Size stripSize,
+        int offsetDips, int dpi, RdpDockEdge edge = RdpDockEdge.Top)
+    {
+        double pixels = Math.Round(offsetDips * (dpi / 96d));
+        int offset = (int)Math.Clamp(pixels, 0, ExitDockTravel(dockArea, stripSize, edge));
+        var location = edge switch
+        {
+            RdpDockEdge.Left => new Point(dockArea.Left, dockArea.Top + offset),
+            RdpDockEdge.Right => new Point(dockArea.Right - stripSize.Width, dockArea.Top + offset),
+            _ => new Point(dockArea.Right - stripSize.Width - offset, dockArea.Top)
+        };
+        return new Point(location.X - client.Left, location.Y - client.Top);
+    }
+
+    internal static int ExitDockOffsetDips(Rectangle dockArea, Size stripSize, Point pointer, Point grabOffset,
+        RdpDockEdge edge, int dpi)
+    {
+        int offset = edge == RdpDockEdge.Top
+            ? dockArea.Right - stripSize.Width - (pointer.X - grabOffset.X)
+            : pointer.Y - grabOffset.Y - dockArea.Top;
+        int pixels = Math.Clamp(offset, 0, ExitDockTravel(dockArea, stripSize, edge));
+        return (int)Math.Round(pixels * (96d / dpi));
+    }
+
+    private static int ExitDockTravel(Rectangle dockArea, Size stripSize, RdpDockEdge edge) => edge == RdpDockEdge.Top
+        ? dockArea.Width - stripSize.Width
+        : dockArea.Height - stripSize.Height;
 }
 
 internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 {
     private const int DefaultExitRightOffsetDips = 24;
-    private const string ExitDockHint = "Ctrl+Shift+F exits full screen. Ctrl+Shift+N minimizes. Drag either button to move the controls.";
+    private const string ExitDockHint = "Ctrl+Shift+F exits full screen. Ctrl+Shift+N minimizes. Drag either button to the top, left, or right edge.";
     private readonly DesktopWindow window;
     private readonly RdpActiveX control;
     private readonly RdpWindowGlow windowGlow;
@@ -123,7 +183,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             fullScreenControls.Minimize.Click += (_, _) => MinimizeDesktop();
             foreach (var button in new[] { fullScreenControls.Exit, fullScreenControls.Minimize })
             {
-                button.DockDragged += DragFullScreenControls;
+                button.DockDragged += (pointer, grabPoint) => DragFullScreenControls(button, pointer, grabPoint);
                 button.DockDragEnded += CompleteExitDock;
                 exitDockHelp.SetToolTip(button, ExitDockHint);
             }
@@ -263,7 +323,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             control.Disconnected += code =>
             {
                 if (!closing)
-                    CompleteSession(DescribeDisconnect(code, signedIn, warningSeen, savedPassword));
+                    CompleteSession(DescribeDisconnect(code, signedIn, warningSeen, savedPassword,
+                        control.ReadExtendedDisconnectReason()));
             };
             control.LogonError += code =>
             {
@@ -528,41 +589,61 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
     private void PositionFullScreenControls()
     {
         var client = window.RectangleToScreen(window.ClientRectangle);
-        var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
-        var displays = ExitDisplays(client, controlsSize);
-        var placement = dragDock ?? exitDock;
-        var chosen = displays.FirstOrDefault(display =>
-            string.Equals(display.Screen.DeviceName, placement?.Monitor, StringComparison.OrdinalIgnoreCase));
-        int offset = DefaultExitRightOffsetDips;
-        if (chosen.Screen is not null && placement is { } dock)
-            offset = dock.RightOffsetDips;
-        else
-            chosen = displays.FirstOrDefault(display => display.Screen.Bounds == fullScreenMonitor, displays.FirstOrDefault());
+        var previousEdge = fullScreenControls.Edge;
+        var screens = Screen.AllScreens;
+        if ((dragDock ?? exitDock) is { } placement)
+        {
+            var saved = screens.FirstOrDefault(screen =>
+                string.Equals(screen.DeviceName, placement.Monitor, StringComparison.OrdinalIgnoreCase));
+            if (saved is not null && Place(saved.Bounds, placement.Edge, placement.OffsetDips))
+                return;
+        }
 
-        if (chosen.Screen is not null)
-            fullScreenControls.Location = RdpDisplayTopology.ExitDockLocation(client, chosen.Area, controlsSize, offset, window.DeviceDpi);
+        if (Place(fullScreenMonitor, RdpDockEdge.Top, DefaultExitRightOffsetDips))
+            return;
+        foreach (var screen in screens)
+        {
+            if (Place(screen.Bounds, RdpDockEdge.Top, DefaultExitRightOffsetDips))
+                return;
+        }
+        fullScreenControls.SetDockEdge(previousEdge);
+
+        bool Place(Rectangle monitor, RdpDockEdge edge, int offset)
+        {
+            fullScreenControls.SetDockEdge(edge);
+            var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
+            if (RdpDisplayTopology.ExitDockArea(client, monitor, controlsSize, edge) is not { } area)
+                return false;
+            fullScreenControls.Location = RdpDisplayTopology.ExitDockLocation(client, area, controlsSize,
+                offset, window.DeviceDpi, edge);
+            return true;
+        }
     }
 
-    private static (Screen Screen, Rectangle Area)[] ExitDisplays(Rectangle client, Size buttonSize) =>
-        (from screen in Screen.AllScreens
-         let area = RdpDisplayTopology.ExitDockArea(client, screen.Bounds, buttonSize)
-         where area.HasValue
-         select (screen, area.GetValueOrDefault())).ToArray();
-
-    private void DragFullScreenControls(Point pointer, int grabOffset)
+    private void DragFullScreenControls(FullScreenDockButton button, Point pointer, Point grabPoint)
     {
         if (!fullScreen || closing)
             return;
         var client = window.RectangleToScreen(window.ClientRectangle);
-        var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
-        var chosen = ExitDisplays(client, controlsSize).FirstOrDefault(display => display.Area.Contains(pointer));
-        if (chosen.Screen is null)
+        var screen = Screen.FromPoint(pointer);
+        var previousEdge = fullScreenControls.Edge;
+        // Decide which edge to try before measuring its layout.
+        if (RdpDisplayTopology.ExitDockEdge(client, screen.Bounds, Size.Empty, pointer, previousEdge, window.DeviceDpi) is not { } edge)
             return;
 
-        int offset = Math.Clamp(chosen.Area.Right - pointer.X + grabOffset - controlsSize.Width,
-            0, chosen.Area.Width - controlsSize.Width);
-        dragDock = new(chosen.Screen.DeviceName, (int)Math.Round(offset * (96d / window.DeviceDpi)));
-        PositionFullScreenControls();
+        fullScreenControls.SetDockEdge(edge);
+        var controlsSize = fullScreenControls.GetPreferredSize(Size.Empty);
+        if (RdpDisplayTopology.ExitDockArea(client, screen.Bounds, controlsSize, edge) is not { } area)
+        {
+            fullScreenControls.SetDockEdge(previousEdge);
+            return;
+        }
+        var grabOffset = new Point(button.Left + Math.Clamp(grabPoint.X, 0, Math.Max(0, button.Width - 1)),
+            button.Top + Math.Clamp(grabPoint.Y, 0, Math.Max(0, button.Height - 1)));
+        int offset = RdpDisplayTopology.ExitDockOffsetDips(area, controlsSize, pointer, grabOffset, edge, window.DeviceDpi);
+        dragDock = new(screen.DeviceName, offset, edge);
+        fullScreenControls.Location = RdpDisplayTopology.ExitDockLocation(client, area, controlsSize,
+            offset, window.DeviceDpi, edge);
     }
 
     private void CompleteExitDock(bool commit)
@@ -658,8 +739,13 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         _ => new($"The Windows Remote Desktop client failed (RDP code {code}). Choose Open Remote Desktop or share the code with your administrator.", FailureKind.ManualRetry)
     };
 
-    internal static Failure DescribeDisconnect(int code, bool signedIn, bool warningSeen, bool savedPassword) => code switch
+    internal static Failure DescribeDisconnect(int code, bool signedIn, bool warningSeen, bool savedPassword,
+        int extendedReason = 0) => code switch
     {
+        _ when extendedReason == 5 => new("Windows reported that another connection replaced this Remote Desktop session.",
+            FailureKind.Dismissed),
+        _ when extendedReason is 11 or 12 => new("A user disconnected or signed out of the Remote Desktop session.",
+            FailureKind.Dismissed),
         1798 => new("Windows could not read the certificate from the remote PC (RDP code 1798). Ask your administrator to check the certificate configured for Remote Desktop.",
             FailureKind.ActionRequired),
         6919 => new("Windows reported an expired RDP certificate (RDP code 6919). Check this PC's date and time, then ask your administrator to renew the remote PC's certificate.",
@@ -687,9 +773,8 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             new($"RDP could not establish a secure session (RDP code {code}). Ask your administrator to check the remote computer's security configuration.",
                 FailureKind.ActionRequired),
         1 => WindowClosed(signedIn),
-        2 when signedIn => new("A user ended the session on the remote computer."),
-        2 => new("The remote computer ended the connection before sign-in completed. Choose Open Remote Desktop to retry.", FailureKind.ManualRetry),
-        3 when signedIn => new("The remote computer ended the RDP session. Ask your administrator to check session limits if this repeats."),
+        2 => new("A user ended the connection on the remote computer.", FailureKind.Dismissed),
+        3 => new("The remote computer ended the Remote Desktop connection.", FailureKind.Dismissed),
         _ when !signedIn && savedPassword =>
             new($"RDP sign-in failed (RDP code {code}). Review the account in Settings and share the code with your administrator if it repeats.",
                 FailureKind.ActionRequired),
@@ -724,8 +809,12 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
 
     private sealed class FullScreenControls : TableLayoutPanel
     {
-        internal FullScreenDockButton Exit { get; } = new("Exit full screen (Ctrl+Shift+F)");
-        internal FullScreenDockButton Minimize { get; } = new("Minimize (Ctrl+Shift+N)");
+        private const string ExitText = "Exit full screen (Ctrl+Shift+F)";
+        private const string MinimizeText = "Minimize (Ctrl+Shift+N)";
+        private readonly FullScreenDivider divider = new();
+        internal FullScreenDockButton Exit { get; } = new(ExitText);
+        internal FullScreenDockButton Minimize { get; } = new(MinimizeText);
+        internal RdpDockEdge Edge { get; private set; }
 
         internal FullScreenControls()
         {
@@ -734,21 +823,39 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             Padding = new Padding(1);
             ColumnCount = 3;
-            RowCount = 1;
+            RowCount = 3;
             GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
             AccessibleName = "Full-screen controls";
             AccessibleRole = AccessibleRole.Grouping;
             Controls.Add(Exit, 0, 0);
-            Controls.Add(new Label
-            {
-                Text = "|",
-                AutoSize = true,
-                Anchor = AnchorStyles.None,
-                Margin = new Padding(2, 0, 2, 0),
-                AccessibleRole = AccessibleRole.Separator
-            }, 1, 0);
+            Controls.Add(divider, 1, 0);
             Controls.Add(Minimize, 2, 0);
             ApplyColors();
+        }
+
+        internal void SetDockEdge(RdpDockEdge edge)
+        {
+            bool stacked = edge != RdpDockEdge.Top;
+            bool sameLayout = stacked == (Edge != RdpDockEdge.Top);
+            Edge = edge;
+            if (sameLayout)
+                return;
+
+            SuspendLayout();
+            try
+            {
+                // Keep the original controls under the same parent while they hold mouse capture.
+                SetCellPosition(divider, stacked ? new(0, 1) : new(1, 0));
+                SetCellPosition(Minimize, stacked ? new(0, 2) : new(2, 0));
+                Exit.Text = stacked ? "Exit full\nscreen\n(Ctrl+Shift+F)" : ExitText;
+                Minimize.Text = stacked ? "Minimize\n(Ctrl+Shift+N)" : MinimizeText;
+                var padding = stacked ? new Padding(3, 4, 3, 4) : Padding.Empty;
+                Exit.Padding = Minimize.Padding = padding;
+                var anchor = stacked ? AnchorStyles.Left | AnchorStyles.Right : AnchorStyles.Top | AnchorStyles.Left;
+                Exit.Anchor = Minimize.Anchor = anchor;
+                divider.SetStacked(stacked);
+            }
+            finally { ResumeLayout(performLayout: true); }
         }
 
         protected override void OnSystemColorsChanged(EventArgs e)
@@ -771,19 +878,55 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
         }
     }
 
+    private sealed class FullScreenDivider : Label
+    {
+        private bool stacked;
+
+        internal FullScreenDivider()
+        {
+            AutoSize = true;
+            AccessibleRole = AccessibleRole.Separator;
+            SetStacked(false);
+        }
+
+        internal void SetStacked(bool vertical)
+        {
+            stacked = vertical;
+            Text = vertical ? "" : "|";
+            Anchor = vertical ? AnchorStyles.Left | AnchorStyles.Right : AnchorStyles.None;
+            Margin = vertical ? new Padding(4, 2, 4, 2) : new Padding(2, 0, 2, 0);
+            Invalidate();
+        }
+
+        public override Size GetPreferredSize(Size proposedSize) =>
+            stacked ? new Size(1, 1) : base.GetPreferredSize(proposedSize);
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            if (!stacked)
+            {
+                base.OnPaint(e);
+                return;
+            }
+            using var pen = new Pen(ForeColor);
+            e.Graphics.DrawLine(pen, 0, Height / 2, Width - 1, Height / 2);
+        }
+    }
+
     private sealed class FullScreenDockButton : Button
     {
         private const int LeftButtonUpMessage = 0x0202;
         private Rectangle dragThreshold;
-        private int grabOffset;
+        private Point grabPoint;
         private bool pressed, dragging, releasing;
 
-        internal event Action<Point, int>? DockDragged;
+        internal event Action<Point, Point>? DockDragged;
         internal event Action<bool>? DockDragEnded;
 
         internal FullScreenDockButton(string text)
         {
             Text = text;
+            AccessibleName = text;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             Margin = Padding.Empty;
@@ -803,7 +946,7 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             var movement = SystemInformation.DragSize;
             dragThreshold = new Rectangle(start.X - movement.Width / 2, start.Y - movement.Height / 2,
                 movement.Width, movement.Height);
-            grabOffset = Left + e.X;
+            grabPoint = e.Location;
             pressed = true;
         }
 
@@ -817,10 +960,10 @@ internal sealed class HostedRdpSession : IRdpSession, IMessageFilter
             if (!dragging && !dragThreshold.Contains(pointer))
             {
                 dragging = true;
-                Cursor = Cursors.SizeWE;
+                Cursor = Cursors.SizeAll;
             }
             if (dragging)
-                DockDragged?.Invoke(pointer, grabOffset);
+                DockDragged?.Invoke(pointer, grabPoint);
         }
 
         protected override void OnClick(EventArgs e)

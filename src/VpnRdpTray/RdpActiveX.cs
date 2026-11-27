@@ -199,6 +199,13 @@ internal sealed class RdpActiveX() : AxHost("1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B
 
     internal void Connect() => Client.Connect();
 
+    internal int ReadExtendedDisconnectReason()
+    {
+        try { return (int)Client.ExtendedDisconnectReason; }
+        catch (Exception ex) when (ex is COMException or RuntimeBinderException or InvalidOperationException or InvalidCastException)
+        { return 0; }
+    }
+
     internal bool SupportsPointerInput => control is IRdpPointerInput;
 
     internal bool MoveRemotePointer(Point point) => control is IRdpPointerInput input && (short)Client.Connected == 1 &&

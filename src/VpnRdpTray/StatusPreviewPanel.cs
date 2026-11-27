@@ -91,14 +91,17 @@ internal sealed class StatusPreviewPanel : Control
     {
         var shownRdp = !rdpEnabled ? new ConnectionStatus(ConnectionController.RdpOffStatus) :
             !hasConfiguration || !connection ? new ConnectionStatus("RDP waiting for VPN") : rdp;
+        bool waitingForManualOpen = shownRdp.Name == ConnectionController.RdpManualWaitingStatus;
         var rdpStage = shownRdp.Name is "RDP connected" or "Opened in Remote Desktop" ? Stage.Connected :
-            shownRdp.Name == ConnectionController.RdpClosedStatus ? Stage.Waiting :
+            shownRdp.Name is ConnectionController.RdpClosedStatus or ConnectionController.RdpReadyStatus
+                or ConnectionController.RdpManualWaitingStatus ? Stage.Waiting :
             shownRdp.Action || shownRdp.RetryAt.HasValue ? Stage.Attention :
             rdpEnabled && connection && vpn.Name == "VPN connected" && shownRdp.Name != "RDP waiting for VPN" ? Stage.Running : Stage.Waiting;
         string rdpAction = !actionsEnabled ? "Wait for the current change to finish." :
             !hasConfiguration ? "Open Settings to set up Remote Desktop." :
             !connection ? "Turn VPN on to control Remote Desktop." :
-            shownRdp.Name == ConnectionController.RdpClosedStatus ? "Open Remote Desktop." :
+            waitingForManualOpen ? "Wait for the VPN to connect." :
+            shownRdp.Name is ConnectionController.RdpClosedStatus or ConnectionController.RdpReadyStatus ? "Open Remote Desktop." :
             rdpEnabled ? "Turn Remote Desktop off." : "Turn Remote Desktop on.";
         string? rdpContext = shownRdp.Name switch
         {
@@ -112,7 +115,8 @@ internal sealed class StatusPreviewPanel : Control
             _ => null
         };
 
-        ConfigureCircle(rdpCircle, shownRdp, rdpStage, actionsEnabled && hasConfiguration && connection, rdpAction, rdpContext);
+        ConfigureCircle(rdpCircle, shownRdp, rdpStage, actionsEnabled && hasConfiguration && connection && !waitingForManualOpen,
+            rdpAction, rdpContext);
     }
 
     private void ConfigureCircle(StatusCircle circle, ConnectionStatus status, Stage stage, bool enabled, string action,

@@ -4,6 +4,9 @@ The [Releases page](../../releases) contains the current release, the recovered 
 
 | Version | Changes |
 | --- | --- |
+| **1.0.28** | Added a saved manual-only RDP mode for shared remote PCs. The VPN connects normally, and each desktop connection requires an explicit open. The embedded client also pauses automatic RDP when Windows reports that the session was ended or replaced. |
+| **1.0.27** | Stacked the full-screen buttons in a narrower strip when docked to either side. The controls turn back into a horizontal strip at the top. |
+| **1.0.26** | Made the full-screen controls dock to the left and right edges as well as the top. The app remembers the edge and position. |
 | **1.0.25** | Restored Ctrl+Shift+F and Ctrl+Shift+N for the focused embedded desktop while keeping Windows task-switching shortcuts routed to the remote computer. Added a Minimize button beside Exit full screen in the same draggable strip, with each shortcut shown. |
 | **1.0.24** | Moved both glow switches to the first Settings tab. Configured the embedded and native RDP clients to send Windows shortcuts such as Alt+Tab and Win+Tab to the focused remote desktop in windowed and full-screen views. |
 | **1.0.23** | Added more specific VPN certificate and TLS diagnostics. Added separate switches for the embedded desktop’s internal and external glow and removed the installer export button from Settings. Closing Remote Desktop now pauses it for the current app run until you reopen it. |

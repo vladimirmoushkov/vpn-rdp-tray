@@ -30,6 +30,7 @@ internal sealed class SetupForm : Form
     private readonly TextBox rdpPassword = Input(secret: true);
     private readonly ComboBox mode = Choice("Microsoft Entra ID", "Classic Windows");
     private readonly ComboBox entraClient = Choice("Remote Desktop Connection (mstsc)", "Embedded ActiveX prototype");
+    private readonly CheckBox manualRdpConnection = Check("Connect Remote Desktop only when opened manually");
     private readonly CheckBox hosts = Check("Add the hostname and IP to Windows hosts (administrator approval)");
     private readonly CheckBox multiMonitor = Check("Use all monitors in full screen", isChecked: true);
     private readonly CheckBox internalGlow = Check("Internal glow (full screen)", isChecked: true);
@@ -116,6 +117,8 @@ internal sealed class SetupForm : Form
         AddTab("VPN Profile", vpn);
 
         var rdp = Grid();
+        Row(rdp, "Connection", manualRdpConnection);
+        Row(rdp, "", Hint("The VPN still connects automatically. Choose Open Remote Desktop when the remote PC is free. This setting applies after VPN recovery and app restarts."));
         Row(rdp, "Authentication", mode);
         Row(rdp, "Entra client", entraClient);
         Row(rdp, "Hostname", rdpHost);
@@ -282,6 +285,7 @@ internal sealed class SetupForm : Form
         rdpIp.Text = current.Rdp.Ip ?? "";
         port.Text = current.Rdp.Port.ToString(CultureInfo.InvariantCulture);
         rdpUser.Text = current.Rdp.Username;
+        manualRdpConnection.Checked = current.Rdp.ManualConnection;
         hosts.Checked = current.Rdp.WindowsHosts;
         multiMonitor.Checked = current.Rdp.MultiMonitor;
         internalGlow.Checked = current.Rdp.InternalGlow;
@@ -537,6 +541,7 @@ internal sealed class SetupForm : Form
             var rdp = new RdpSettings(host, ip, rdpPort, user, entra ? RdpMode.Entra : RdpMode.Classic,
                 password, hosts.Checked, entra && entraClient.SelectedIndex == 1)
             {
+                ManualConnection = manualRdpConnection.Checked,
                 MultiMonitor = multiMonitor.Checked,
                 InternalGlow = internalGlow.Checked,
                 ExternalGlow = externalGlow.Checked,

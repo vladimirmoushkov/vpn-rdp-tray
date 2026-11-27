@@ -8,6 +8,7 @@ using Microsoft.Win32;
 namespace VpnRdpTray;
 
 internal enum RdpMode { Classic, Entra }
+internal enum RdpDockEdge { Top, Left, Right }
 internal enum TotpAlgorithm { Sha1, Sha256, Sha512 }
 
 internal sealed record VpnSettings(string Profile, string Username, string? Password, int RejectLimit, string? KeyPassword)
@@ -22,6 +23,7 @@ internal sealed record VpnSettings(string Profile, string Username, string? Pass
 internal sealed record RdpSettings(string Host, string? Ip, int Port, string Username, RdpMode Mode,
     string? Password, bool WindowsHosts, bool EntraActiveX)
 {
+    public bool ManualConnection { get; init; }
     public bool MultiMonitor { get; init; } = true;
     public bool InternalGlow { get; init; } = true;
     public bool ExternalGlow { get; init; } = true;
@@ -39,7 +41,7 @@ internal sealed record Configuration(VpnSettings Vpn, RdpSettings Rdp)
 {
     public override string ToString() => nameof(Configuration);
 }
-internal readonly record struct FullScreenExitPlacement(string Monitor, int RightOffsetDips);
+internal readonly record struct FullScreenExitPlacement(string Monitor, int OffsetDips, RdpDockEdge Edge = RdpDockEdge.Top);
 
 internal sealed class SetupException(string message) : Exception(message);
 
@@ -48,6 +50,7 @@ internal static class Settings
     internal const string RegistryPath = @"Software\VpnRdpTray";
     private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunName = "VpnRdpTray";
+    private const int MaxFullScreenExitOffsetDips = 32766;
     internal static readonly string DirectoryPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VpnRdpTray");
 
@@ -119,13 +122,7 @@ internal static class Settings
             try
             {
                 if (ReadValue(nameof(FullScreenExitDock)) is string stored)
-                {
-                    int separator = stored.LastIndexOf('|');
-                    if (separator > 0 &&
-                        int.TryParse(stored.AsSpan(separator + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int offset) &&
-                        offset <= 32766)
-                        return new(stored[..separator], offset);
-                }
+                    return ParseFullScreenExitDock(stored);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
             return null;
@@ -134,12 +131,45 @@ internal static class Settings
         {
             try
             {
-                SaveValue(nameof(FullScreenExitDock), value is { } dock
-                    ? dock.Monitor + "|" + dock.RightOffsetDips.ToString(CultureInfo.InvariantCulture)
-                    : null);
+                SaveValue(nameof(FullScreenExitDock), value is { } dock ? FormatFullScreenExitDock(dock) : null);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
         }
+    }
+
+    internal static FullScreenExitPlacement? ParseFullScreenExitDock(string stored)
+    {
+        var parts = stored.Split('|');
+        if (parts.Length is not (2 or 3) || string.IsNullOrWhiteSpace(parts[0]) ||
+            !int.TryParse(parts[^1], NumberStyles.None, CultureInfo.InvariantCulture, out int offset) ||
+            offset > MaxFullScreenExitOffsetDips)
+            return null;
+
+        if (parts.Length == 2)
+            return new(parts[0], offset);
+
+        return parts[1] switch
+        {
+            nameof(RdpDockEdge.Left) => new(parts[0], offset, RdpDockEdge.Left),
+            nameof(RdpDockEdge.Right) => new(parts[0], offset, RdpDockEdge.Right),
+            _ => null
+        };
+    }
+
+    internal static string FormatFullScreenExitDock(FullScreenExitPlacement dock)
+    {
+        if (string.IsNullOrWhiteSpace(dock.Monitor) || dock.Monitor.Contains('|'))
+            throw new ArgumentException("A monitor name without separators is required.", nameof(dock));
+        if (dock.OffsetDips is < 0 or > MaxFullScreenExitOffsetDips)
+            throw new ArgumentOutOfRangeException(nameof(dock), "The offset is outside the supported range.");
+
+        string offset = dock.OffsetDips.ToString(CultureInfo.InvariantCulture);
+        return dock.Edge switch
+        {
+            RdpDockEdge.Top => $"{dock.Monitor}|{offset}",
+            RdpDockEdge.Left or RdpDockEdge.Right => $"{dock.Monitor}|{dock.Edge}|{offset}",
+            _ => throw new ArgumentOutOfRangeException(nameof(dock), "The dock edge is unsupported.")
+        };
     }
 
     private static object? ReadValue(string name)

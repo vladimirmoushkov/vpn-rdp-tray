@@ -30,6 +30,7 @@ internal static class Program
         TestTransportAsync().GetAwaiter().GetResult();
         TestRdpProbeResults();
         TestRdpSettings();
+        TestFullScreenDocking();
         TestRdpActivitySchedule();
         TestNativeRedirectionSettings();
         TestWindowGlow();
@@ -349,6 +350,7 @@ internal static class Program
             var changed = configuration with { Rdp = TestRdp with
             {
                 Port = 3389,
+                ManualConnection = true,
                 MultiMonitor = false,
                 InternalGlow = false,
                 ExternalGlow = true,
@@ -360,7 +362,7 @@ internal static class Program
                 RedirectDrives = false
             } };
             Settings.Save(directory, changed);
-            Require(Settings.Load(directory) == changed, "Atomic replacement preserves explicitly disabled RDP options");
+            Require(Settings.Load(directory) == changed, "Atomic replacement preserves manual RDP and explicitly disabled RDP options");
             changed = changed with { Rdp = changed.Rdp with { InternalGlow = true, ExternalGlow = false } };
             Settings.Save(directory, changed);
             Require(Settings.Load(directory) == changed, "Internal and external glow can be saved independently");
@@ -377,7 +379,8 @@ internal static class Program
             var legacyRdp = legacy["Rdp"]!.AsObject();
             foreach (var option in new[]
             {
-                nameof(RdpSettings.MultiMonitor), nameof(RdpSettings.InternalGlow), nameof(RdpSettings.ExternalGlow), nameof(RdpSettings.RedirectSecurityKeys),
+                nameof(RdpSettings.ManualConnection), nameof(RdpSettings.MultiMonitor), nameof(RdpSettings.InternalGlow),
+                nameof(RdpSettings.ExternalGlow), nameof(RdpSettings.RedirectSecurityKeys),
                 nameof(RdpSettings.RedirectUsbDevices), nameof(RdpSettings.RedirectPrinters),
                 nameof(RdpSettings.RedirectClipboard), nameof(RdpSettings.RedirectDrives), nameof(RdpSettings.SimulateActivity)
             })
@@ -387,9 +390,9 @@ internal static class Program
             var legacyConfiguration = Settings.Load(directory)!;
             Require(legacyConfiguration.Rdp is
             {
-                MultiMonitor: true, InternalGlow: true, ExternalGlow: true, RedirectSecurityKeys: true, RedirectUsbDevices: true,
+                ManualConnection: false, MultiMonitor: true, InternalGlow: true, ExternalGlow: true, RedirectSecurityKeys: true, RedirectUsbDevices: true,
                 RedirectPrinters: true, RedirectClipboard: true, RedirectDrives: true, SimulateActivity: false
-            }, "Existing profiles keep display and resource defaults and activity stays off");
+            }, "Existing profiles keep automatic RDP, display and resource defaults, and activity stays off");
             byte[] migrated = ProtectedData.Unprotect(File.ReadAllBytes(Settings.ConfigPath(directory)), null, DataProtectionScope.CurrentUser);
             try
             {
@@ -645,9 +648,17 @@ internal static class Program
             "Canceling the embedded sign-in prompt requires an explicit reopen");
         Require(HostedRdpSession.DescribeDisconnect(1, true, false, false).Kind == FailureKind.Dismissed,
             "Closing the signed-in embedded desktop requires an explicit reopen");
-        Require(HostedRdpSession.DescribeDisconnect(2, true, false, false).Kind == FailureKind.Transient &&
-            HostedRdpSession.DescribeDisconnect(2308, true, false, false).Kind == FailureKind.Transient,
-            "Remote disconnects and network failures still retry");
+        Require(HostedRdpSession.DescribeDisconnect(2, true, false, false).Kind == FailureKind.Dismissed &&
+            HostedRdpSession.DescribeDisconnect(3, true, false, false).Kind == FailureKind.Dismissed,
+            "Windows-reported remote user or server disconnects require an explicit reopen");
+        Require(HostedRdpSession.DescribeDisconnect(2308, true, false, false).Kind == FailureKind.Transient,
+            "A plain network disconnect still retries");
+        Require(HostedRdpSession.DescribeDisconnect(2308, true, false, false, extendedReason: 5)
+            is { Kind: FailureKind.Dismissed } replacement && replacement.Reason.Contains("replaced", StringComparison.Ordinal),
+            "A reported replacement takes precedence over a socket close");
+        Require(HostedRdpSession.DescribeDisconnect(0, true, false, false, extendedReason: 11).Kind == FailureKind.Dismissed &&
+            HostedRdpSession.DescribeDisconnect(0, true, false, false, extendedReason: 12).Kind == FailureKind.Dismissed,
+            "Remote user disconnect and sign-out require an explicit reopen");
         Require(NativeRdpSession.DescribeExit(0).Kind == FailureKind.Dismissed &&
             NativeRdpSession.DescribeExit(11) is { Kind: FailureKind.Dismissed } ended &&
             ended.Reason.Contains("code 11", StringComparison.Ordinal),
@@ -661,6 +672,54 @@ internal static class Program
             HostedRdpSession.WindowedMinimumSize(new Size(1920, 1080)) == new Size(1280, 720),
             "Windowed minimum rounds each physical screen dimension up to at least two-thirds");
         Console.WriteLine("RDP settings, monitor topology, exit docking, retry and sign-in outcome classification passed.");
+    }
+
+    private static void TestFullScreenDocking()
+    {
+        var client = new Rectangle(-1920, -240, 4480, 1680);
+        var monitor = new Rectangle(-1920, 0, 1920, 1080);
+        var strip = new Size(270, 36);
+        Require(RdpDisplayTopology.ExitDockLocation(client, monitor, strip, 100, 144, RdpDockEdge.Left) ==
+            new Point(0, 390), "Left dock scales its top offset and uses the full-screen window origin");
+        Require(RdpDisplayTopology.ExitDockLocation(client, monitor, strip, 5000, 144, RdpDockEdge.Right) ==
+            new Point(1650, 1284), "Right dock clamps the complete strip inside its monitor");
+        Require(RdpDisplayTopology.ExitDockOffsetDips(monitor, strip, new Point(-1908, 315), new Point(70, 15),
+            RdpDockEdge.Left, 144) == 200, "Side drag preserves the vertical grab point");
+        Require(RdpDisplayTopology.ExitDockOffsetDips(monitor, strip, new Point(-840, 200), new Point(160, 18),
+            RdpDockEdge.Top, 96) == 730, "Top drag preserves the horizontal grab point");
+        Require(RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-1880, 500), RdpDockEdge.Top, 144) ==
+            RdpDockEdge.Left, "The left snap zone scales with DPI");
+        Require(RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-1, 480), RdpDockEdge.Top, 96) ==
+            RdpDockEdge.Right, "The last visible pixel snaps to the right edge");
+        Require(RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-1000, 10), RdpDockEdge.Right, 96) ==
+            RdpDockEdge.Top, "Dragging near the top returns the band to the top edge");
+        Require(RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-1000, 500), RdpDockEdge.Left, 96) ==
+            RdpDockEdge.Left, "Moving away from snap zones keeps the selected edge");
+        Require(RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-1912, 8), RdpDockEdge.Left, 96) ==
+            RdpDockEdge.Left, "A corner tie retains the current edge");
+        var clipped = new Rectangle(-1920, 50, 1920, 1030);
+        Require(RdpDisplayTopology.ExitDockArea(clipped, monitor, strip) is null &&
+            RdpDisplayTopology.ExitDockEdge(clipped, monitor, strip, new Point(-1918, 60), RdpDockEdge.Top, 96) ==
+            RdpDockEdge.Left, "The drag skips a covered monitor edge and can still use a visible side");
+        var small = new Rectangle(-1920, 0, strip.Width - 1, strip.Height);
+        Require(RdpDisplayTopology.ExitDockEdge(small, monitor, strip, small.Location, RdpDockEdge.Right, 96) is null &&
+            RdpDisplayTopology.ExitDockEdge(client, monitor, strip, new Point(-960, -120), RdpDockEdge.Top, 96) is null,
+            "Dragging across a gap or an area where the strip does not fit leaves it in place");
+
+        const string device = "fixture-monitor";
+        foreach (var edge in Enum.GetValues<RdpDockEdge>())
+        {
+            var placement = new FullScreenExitPlacement(device, 24, edge);
+            Require(Settings.ParseFullScreenExitDock(Settings.FormatFullScreenExitDock(placement)) == placement,
+                "Remember the monitor, edge and offset for each dock");
+        }
+        Require(Settings.FormatFullScreenExitDock(new(device, 24)) == $"{device}|24" &&
+            Settings.ParseFullScreenExitDock($"{device}|24") == new FullScreenExitPlacement(device, 24),
+            "Read and write existing top placements in their original format");
+        Require(Settings.ParseFullScreenExitDock($"{device}|Bottom|12") is null &&
+            Settings.ParseFullScreenExitDock($"{device}|Left|-1") is null,
+            "Reject invalid stored placements");
+        Console.WriteLine("Full-screen docking passed for all three edges, DPI scaling, monitor geometry and saved placements.");
     }
 
     private static void TestNativeRedirectionSettings()

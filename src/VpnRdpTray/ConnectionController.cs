@@ -11,6 +11,8 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
     internal const string RdpClosedStatus = "RDP window closed";
     internal const string RdpReopenTip = "Choose Open Remote Desktop in the tray or click RDP in the status window.";
     internal const string RdpOffStatus = "RDP off";
+    internal const string RdpReadyStatus = "RDP ready";
+    internal const string RdpManualWaitingStatus = "RDP needs VPN";
     internal const string VpnSignInStatus = "VPN sign-in required";
     private const string VpnCheckingAfterResume = "VPN checking after wake";
     private const string VpnRefreshingAfterResume = "VPN reconnecting after wake";
@@ -24,8 +26,9 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
     private CancellationTokenSource? rdpAttemptStop;
     private TaskCompletionSource? rdpEnabledChanged, rdpWake, vpnWake;
     private Tunnel? activeTunnel;
+    private Tunnel? manualRdpRequest;
     private ResumeCheck? resumeCheck;
-    private bool foreground, revealNextVpnPrompt, rdpRetryScheduled, rdpDismissed;
+    private bool foreground, revealNextVpnPrompt, rdpRetryScheduled, rdpDismissed, manualRdp;
     private (bool Internal, bool External) rdpGlow;
     private ConnectionStatus vpn = new("VPN idle");
     private ConnectionStatus rdp = new("RDP waiting for VPN");
@@ -39,6 +42,12 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         if (lifetime is not null)
             throw new InvalidOperationException("A connection manager is already running.");
         rdpGlow = (configuration.Rdp.InternalGlow, configuration.Rdp.ExternalGlow);
+        manualRdp = configuration.Rdp.ManualConnection;
+        if (manualRdp)
+        {
+            RdpEnabled = true;
+            rdpDismissed = false;
+        }
         lifetime = new CancellationTokenSource();
         work = RunAsync(configuration, lifetime.Token);
     }
@@ -84,6 +93,18 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         }
         if (lifetime is null || lifetime.IsCancellationRequested || rdp.Name == "RDP paused" || vpn.Action)
             return false;
+        if (manualRdp)
+        {
+            if (activeTunnel is not { } tunnel || vpnAttemptStop is not { IsCancellationRequested: false })
+                return false;
+            if (rdpAttemptStop is { IsCancellationRequested: false } || ReferenceEquals(manualRdpRequest, tunnel))
+                return true;
+            manualRdpRequest = tunnel;
+            foreground = true;
+            Rdp(new("RDP starting"));
+            rdpEnabledChanged?.TrySetResult();
+            return true;
+        }
         foreground = true;
         SetRemoteDesktopEnabled(true);
         if (rdpDismissed)
@@ -98,7 +119,14 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
 
     internal void ToggleRemoteDesktop()
     {
-        if (rdpDismissed)
+        if (manualRdp && (manualRdpRequest is not null || rdpAttemptStop is { IsCancellationRequested: false }))
+        {
+            manualRdpRequest = null;
+            foreground = false;
+            rdpAttemptStop?.Cancel();
+            CompleteResumeCheck(resumeCheck);
+        }
+        else if (manualRdp || rdpDismissed)
             OpenRemoteDesktop();
         else
             SetRemoteDesktopEnabled(!RdpEnabled);
@@ -160,6 +188,10 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         display(vpn, rdp);
     }
 
+    private void RdpWaitingForVpn() => Rdp(manualRdp
+        ? new(RdpManualWaitingStatus, "Open Remote Desktop after the VPN connects.")
+        : new("RDP waiting for VPN"));
+
     private async Task RunAsync(Configuration configuration, CancellationToken token)
     {
         var settings = configuration.Vpn;
@@ -169,7 +201,7 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         DateTimeOffset? connectedAt = null;
         int transientFailures = 0, attempt = 0;
         string? lastFailure = null;
-        Rdp(new("RDP waiting for VPN"));
+        RdpWaitingForVpn();
 
         void TunnelChanged(Tunnel? tunnel)
         {
@@ -178,7 +210,14 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                 activeTunnel = null;
                 resumeCheck = null;
                 rdpStop?.Cancel();
-                if (!token.IsCancellationRequested && connectedAt is not null && vpn.Name != VpnRefreshingAfterResume)
+                if (manualRdp)
+                {
+                    manualRdpRequest = null;
+                    foreground = false;
+                    if (!token.IsCancellationRequested)
+                        RdpWaitingForVpn();
+                }
+                else if (!token.IsCancellationRequested && connectedAt is not null && vpn.Name != VpnRefreshingAfterResume)
                     Rdp(new("RDP suspended"));
                 return;
             }
@@ -244,7 +283,7 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                 if (connectedAt is { } upSince && DateTimeOffset.UtcNow - upSince >= TimeSpan.FromSeconds(30))
                     transientFailures = 0;
                 connectedAt = null;
-                Rdp(new("RDP waiting for VPN"));
+                RdpWaitingForVpn();
 
                 if (failure is null || attemptStop.IsCancellationRequested && failure.Kind == FailureKind.Transient)
                 {
@@ -296,6 +335,7 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
         finally
         {
             activeTunnel = null;
+            manualRdpRequest = null;
             resumeCheck = null;
             if (rdpStop is not null)
             {
@@ -360,20 +400,28 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             {
                 var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 rdpEnabledChanged = changed;
-                if (!RdpEnabled || rdpDismissed)
+                if (!RdpEnabled || rdpDismissed || settings.ManualConnection && !ReferenceEquals(manualRdpRequest, tunnel))
                 {
+                    if (settings.ManualConnection && rdp.Name is not (RdpReadyStatus or "RDP paused"))
+                        Rdp(new(RdpReadyStatus, "Choose Open Remote Desktop to connect."));
                     await changed.Task.WaitAsync(token);
                     continue;
                 }
 
+                manualRdpRequest = null;
                 // Finish tearing down the old client before another attempt can start, even after rapid toggles.
                 using var attemptStop = CancellationTokenSource.CreateLinkedTokenSource(token);
                 rdpAttemptStop = attemptStop;
                 try { await RunRdpAsync(settings, tunnel, attemptStop.Token); }
-                finally { rdpAttemptStop = null; }
+                finally
+                {
+                    rdpAttemptStop = null;
+                    if (settings.ManualConnection && manualRdpRequest is null)
+                        foreground = false;
+                }
 
                 // Hold after dismissal or a Settings block until the user acts or the tunnel closes.
-                if (!attemptStop.IsCancellationRequested)
+                if (!settings.ManualConnection && !attemptStop.IsCancellationRequested)
                     await changed.Task.WaitAsync(token);
             }
         }
@@ -407,8 +455,12 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                     });
                     token.ThrowIfCancellationRequested();
                     if (CurrentResumeCheck(tunnel) is { } latest && !ReferenceEquals(latest, afterResume))
-                        continue; // A probe already in progress at wake cannot verify the resumed network.
-                    if (endpoint is null)
+                    {
+                        if (!settings.ManualConnection)
+                            continue; // A probe already in progress at wake cannot verify the resumed network.
+                        failure = new("Windows woke before the VPN route could be verified. Choose Open Remote Desktop to try again.");
+                    }
+                    else if (endpoint is null)
                     {
                         failure = checkFailure!;
                         if (canRefresh && TryRefreshVpn(afterResume, failure, token))
@@ -438,11 +490,7 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                 {
                     failure = new("Windows could not check the RDP route or start the client. Check the saved hostname and port in Settings.");
                 }
-                token.ThrowIfCancellationRequested();
-                CompleteResumeCheck(afterResume);
-                lastFailure = failure.Reason;
-
-                if (failure.Kind == FailureKind.Dismissed)
+                if (!settings.ManualConnection && failure.Kind == FailureKind.Dismissed)
                 {
                     // A tray click during teardown already asked for a new foreground session.
                     if (foreground)
@@ -453,11 +501,21 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
                     Rdp(new(RdpClosedStatus, detail));
                     return;
                 }
+                token.ThrowIfCancellationRequested();
+                CompleteResumeCheck(afterResume);
+                lastFailure = failure.Reason;
+
                 if (failure.Kind is FailureKind.CredentialRejected or FailureKind.ActionRequired)
                 {
                     CompleteResumeCheck(CurrentResumeCheck(tunnel));
                     Settings.RdpAction = failure.Reason;
                     Rdp(new("RDP paused", failure.Reason, Action: true));
+                    return;
+                }
+                if (settings.ManualConnection)
+                {
+                    CompleteResumeCheck(CurrentResumeCheck(tunnel));
+                    Rdp(new(RdpReadyStatus, failure.Reason));
                     return;
                 }
                 if (failure.Kind == FailureKind.ManualRetry)
@@ -511,7 +569,7 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             }
             catch (Exception ex) when (HostedRdpSession.IsClientException(ex))
             {
-                if (settings.Mode == RdpMode.Classic)
+                if (settings.Mode == RdpMode.Classic || settings.ManualConnection)
                     return (new($"Windows could not start the RDP control (0x{ex.HResult:X8}). Check Remote Desktop and Windows updates.",
                         FailureKind.ActionRequired), false, false);
                 native = true;
@@ -531,7 +589,10 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
             var route = MonitorRouteAsync(endpoint, tunnel, monitor.Token);
             try
             {
-                var finished = await Task.WhenAny(rdpSession!.Completion, route);
+                var session = rdpSession!.Completion;
+                var finished = await Task.WhenAny(session, route);
+                if (session.IsCompletedSuccessfully && session.Result.Kind == FailureKind.Dismissed)
+                    finished = session;
                 return (await finished, native, DateTimeOffset.UtcNow - started >= TimeSpan.FromSeconds(30));
             }
             finally
@@ -613,7 +674,10 @@ internal sealed class ConnectionController(VpnSignInPrompt vpnPrompt, Action<Con
 
         resumeCheck = null;
         Vpn(new(VpnRefreshingAfterResume, $"Remote Desktop did not respond through the VPN after wake. {failure.Reason}"));
-        Rdp(new("RDP waiting for VPN", "The VPN is reconnecting once before another Remote Desktop check."));
+        if (manualRdp)
+            RdpWaitingForVpn();
+        else
+            Rdp(new("RDP waiting for VPN", "The VPN is reconnecting once before another Remote Desktop check."));
         attempt.Cancel();
         return true;
     }
